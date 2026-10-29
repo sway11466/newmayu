@@ -127,7 +127,7 @@ impl ModSpec {
     pub const fn any() -> Self {
         ModSpec {
             pressed: 0,
-            dontcare: u16::MAX,
+            dontcare: (1 << BasicMod::ALL.len()) - 1,
         }
     }
     /// `C-` のように押下を要求する。
@@ -286,13 +286,27 @@ impl Keymap {
     }
 
     /// `key 修飾-キー = 動作…`
+    ///
+    /// 後に書いた割付が先に照合される（yamy の `addAssignment` は先頭に挿入する）。
+    /// キー・修飾・押し離しが同じ割付があれば置き換える。
     pub fn assign(&mut self, key: Key, mods: ModSpec, edge: EdgeSpec, actions: Vec<Action>) {
-        self.assignments.push(Assignment {
-            key,
-            mods,
-            edge,
-            actions,
-        });
+        if let Some(a) = self
+            .assignments
+            .iter_mut()
+            .find(|a| a.key == key && a.mods == mods && a.edge == edge)
+        {
+            a.actions = actions;
+            return;
+        }
+        self.assignments.insert(
+            0,
+            Assignment {
+                key,
+                mods,
+                edge,
+                actions,
+            },
+        );
     }
 
     /// このキーが修飾キーとして登録されていれば、その修飾を返す。

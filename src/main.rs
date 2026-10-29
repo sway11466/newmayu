@@ -1,4 +1,8 @@
-//! PoC: フックを張り、直書きの設定でキーを差し替える。
+//! PoC: フックを張り、`.mayu` の設定でキーを差し替える。
+//!
+//! ```text
+//! newmayu <file.mayu>
+//! ```
 //!
 //! 保険（PoC 専用）:
 //! - 起動から 60 秒で必ず終了する
@@ -7,6 +11,8 @@
 //! 構成は yamy と同じ。コールバックはイベントをキューに積んで `1` を返し（抑制）、
 //! 別スレッドのエンジンが処理して `SendInput` する。
 
+use std::path::Path;
+use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::sync::mpsc::{Sender, channel};
 use std::thread;
@@ -18,45 +24,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
 };
 
+use newmayu::config::parser;
 use newmayu::engine::{Engine, Input};
-use newmayu::model::{Action, BasicMod, Config, EdgeSpec, Key, Keymap, KeymapId, ModSpec};
 use newmayu::platform;
 
 const AUTO_EXIT_SECS: u64 = 60;
 const ESC_SCAN: u32 = 0x01;
-
-// 109.mayu のスキャンコード
-const A: Key = Key::plain(0x1e);
-const B: Key = Key::plain(0x30);
-const H: Key = Key::plain(0x23);
-const BACK_SPACE: Key = Key::plain(0x0e);
-const L_CONTROL: Key = Key::plain(0x1d);
-const R_CONTROL: Key = Key::e0(0x1d);
-
-/// 直書きの設定。`.mayu` で書けばこうなる:
-///
-/// ```text
-/// def mod Control = LControl RControl
-/// keymap Global
-///  key A   = B
-///  key C-H = BackSpace
-/// ```
-fn config() -> Config {
-    let global_id = KeymapId(0);
-    let mut global = Keymap::new("Global", None);
-    global.add_mod_key(BasicMod::Control, L_CONTROL);
-    global.add_mod_key(BasicMod::Control, R_CONTROL);
-    global.assign(A, ModSpec::none(), EdgeSpec::Both, vec![Action::key(B)]);
-    global.assign(
-        H,
-        ModSpec::none().with(BasicMod::Control),
-        EdgeSpec::Both,
-        vec![Action::key(BACK_SPACE)],
-    );
-    let mut config = Config::new(vec![global], global_id);
-    config.def_mod(BasicMod::Control, [L_CONTROL, R_CONTROL]);
-    config
-}
 
 /// フックのコールバックからエンジンスレッドへ渡すキュー。
 /// コールバックは C の関数でユーザーポインタを受け取れないため static に置く。
@@ -84,7 +57,28 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-fn main() {
+fn main() -> ExitCode {
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("使い方: newmayu <file.mayu>");
+        return ExitCode::FAILURE;
+    };
+    let config = match parser::load(Path::new(&path)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!(
+        "{path}: キーマップ {} 個、割付 {} 件",
+        config.keymaps.len(),
+        config
+            .keymaps
+            .iter()
+            .map(|k| k.assignments.len())
+            .sum::<usize>()
+    );
+
     let (tx, rx) = channel::<Input>();
     TX.set(tx).expect("TX は一度だけ設定する");
 
@@ -97,7 +91,7 @@ fn main() {
 
     // エンジンスレッド
     thread::spawn(move || {
-        let mut engine = Engine::new(config());
+        let mut engine = Engine::new(config);
         for input in rx {
             let outputs = engine.feed(input);
             eprintln!("{input:?} -> {outputs:?}");
@@ -109,7 +103,7 @@ fn main() {
     // SAFETY: hook_proc は WH_KEYBOARD_LL の規約どおりの関数。
     let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
         .expect("SetWindowsHookEx に失敗");
-    eprintln!("フック設置。A→B、Ctrl-H→BackSpace。Esc で即終了、{AUTO_EXIT_SECS} 秒で自動終了。");
+    eprintln!("フック設置。Esc で即終了、{AUTO_EXIT_SECS} 秒で自動終了。");
 
     let mut msg = MSG::default();
     // SAFETY: msg は有効な MSG。
@@ -117,4 +111,5 @@ fn main() {
 
     // SAFETY: SetWindowsHookExW が返した有効なハンドル。
     let _ = unsafe { UnhookWindowsHookEx(hook) };
+    ExitCode::SUCCESS
 }
