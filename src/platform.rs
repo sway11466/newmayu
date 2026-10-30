@@ -22,9 +22,11 @@ use crate::model::{Edge, Key, ScanPrefix};
 ///
 /// 自分（や他のツール）が `SendInput` したイベントは `LLKHF_INJECTED` が立つので
 /// `None` を返し、呼び元はそのまま次のフックへ流す（yamy と同じ自己ループ回避）。
+/// ただし `test_mark` があれば、`dwExtraInfo` がその印に一致する注入イベントだけは
+/// 物理入力として扱う（テスト入力モード。`--test-input`）。
 /// E1 前置（Pause）はまだ扱わない。
-pub fn input_from_hook(k: &KBDLLHOOKSTRUCT) -> Option<Input> {
-    if k.flags.contains(LLKHF_INJECTED) {
+pub fn input_from_hook(k: &KBDLLHOOKSTRUCT, test_mark: Option<usize>) -> Option<Input> {
+    if k.flags.contains(LLKHF_INJECTED) && test_mark != Some(k.dwExtraInfo) {
         return None;
     }
     let prefix = if k.flags.contains(LLKHF_EXTENDED) {
@@ -136,5 +138,49 @@ pub fn send(outputs: &[Output]) {
     let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
     if sent as usize != inputs.len() {
         crate::log!("SendInput: {} / {} 件しか送れなかった", sent, inputs.len());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT_FLAGS;
+
+    fn hook(scan: u32, flags: KBDLLHOOKSTRUCT_FLAGS, extra: usize) -> KBDLLHOOKSTRUCT {
+        KBDLLHOOKSTRUCT {
+            vkCode: 0,
+            scanCode: scan,
+            flags,
+            time: 0,
+            dwExtraInfo: extra,
+        }
+    }
+
+    const A: Key = Key::plain(0x1e);
+
+    #[test]
+    fn 物理入力は印の有無によらず通す() {
+        let k = hook(0x1e, KBDLLHOOKSTRUCT_FLAGS(0), 0);
+        assert_eq!(input_from_hook(&k, None), Some(Input::down(A)));
+        assert_eq!(input_from_hook(&k, Some(0x6e6d)), Some(Input::down(A)));
+        let k = hook(0x1e, LLKHF_UP, 0);
+        assert_eq!(input_from_hook(&k, None), Some(Input::up(A)));
+    }
+
+    #[test]
+    fn 注入入力は印が一致するときだけ通す() {
+        let k = hook(0x1e, LLKHF_INJECTED, 0);
+        assert_eq!(input_from_hook(&k, None), None);
+        assert_eq!(input_from_hook(&k, Some(0x6e6d)), None);
+        let k = hook(0x1e, LLKHF_INJECTED, 0x6e6d);
+        assert_eq!(input_from_hook(&k, None), None);
+        assert_eq!(input_from_hook(&k, Some(0x6e6d)), Some(Input::down(A)));
+        assert_eq!(input_from_hook(&k, Some(0x1234)), None);
+    }
+
+    #[test]
+    fn e0_前置は拡張フラグで判る() {
+        let k = hook(0x1d, LLKHF_EXTENDED, 0);
+        assert_eq!(input_from_hook(&k, None), Some(Input::down(Key::e0(0x1d))));
     }
 }

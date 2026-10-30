@@ -1,10 +1,14 @@
 //! 本体。フックを張り、`.mayu` の設定でキーを差し替え、タスクトレイに常駐する。
 //!
 //! ```text
-//! newmayu <file.mayu> [--log <path>]
+//! newmayu <file.mayu> [--log <path>] [--test-input <印>]
 //! ```
 //!
 //! `--log` があればログをそのファイルに追記する。無ければ標準エラー。
+//!
+//! `--test-input <印>`（16 進。例 `0x6e6d`）はテスト入力モード。`dwExtraInfo` がその印の
+//! 注入入力（`SendInput` されたもの）を物理入力として扱う。印の無い注入入力は今までどおり
+//! 素通し。テスト用の実行ファイル（`src/bin/selftest.rs`）が使う。
 //!
 //! 構成は yamy と同じ。コールバックはイベントをキューに積んで `1` を返し（抑制）、
 //! 別スレッドのエンジンが処理して `SendInput` する。
@@ -65,11 +69,15 @@ static TX: OnceLock<Sender<Event>> = OnceLock::new();
 /// 一時停止中。コールバックは何もせず次のフックへ流す。
 static PAUSED: AtomicBool = AtomicBool::new(false);
 
+/// テスト入力モードの印（`--test-input`）。フックを掛ける前に設定する。
+static TEST_MARK: OnceLock<Option<usize>> = OnceLock::new();
+
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 && !PAUSED.load(Ordering::Relaxed) {
         // SAFETY: WH_KEYBOARD_LL では lparam は KBDLLHOOKSTRUCT を指す。
         let k = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-        if let Some(input) = platform::input_from_hook(k) {
+        let test_mark = TEST_MARK.get().copied().flatten();
+        if let Some(input) = platform::input_from_hook(k, test_mark) {
             // エンジンスレッドが居なくなっていたら（送れなかったら）抑制せず流す。
             // そうしないとキーボードが死ぬ。
             if let Some(tx) = TX.get()
@@ -88,19 +96,40 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 struct Args {
     mayu: PathBuf,
     log: Option<PathBuf>,
+    /// テスト入力モードの印。
+    test_mark: Option<usize>,
 }
 
-const USAGE: &str = "使い方: newmayu <file.mayu> [--log <path>]";
+const USAGE: &str = "使い方: newmayu <file.mayu> [--log <path>] [--test-input <印(16進)>]";
+
+/// `--test-input` の値。`0x` は付いていてもいなくてもよい。0 は普通の注入入力と
+/// 区別が付かない（`SendInput` の既定の `dwExtraInfo` が 0）ので受け付けない。
+fn parse_test_mark(s: &str) -> Option<usize> {
+    let digits = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    match usize::from_str_radix(digits, 16) {
+        Ok(0) | Err(_) => None,
+        Ok(n) => Some(n),
+    }
+}
 
 /// プログラム名を除いた引数を読む。形が違えば `Err(使い方)`。
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
     let mut mayu = None;
     let mut log = None;
+    let mut test_mark = None;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         if a == "--log" {
             match (it.next(), &log) {
                 (Some(p), None) => log = Some(PathBuf::from(p)),
+                _ => return Err(USAGE.to_string()),
+            }
+        } else if a == "--test-input" {
+            match (it.next().as_deref().and_then(parse_test_mark), &test_mark) {
+                (Some(m), None) => test_mark = Some(m),
                 _ => return Err(USAGE.to_string()),
             }
         } else if mayu.is_none() && !a.starts_with("--") {
@@ -110,7 +139,11 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
         }
     }
     let mayu = mayu.ok_or_else(|| USAGE.to_string())?;
-    Ok(Args { mayu, log })
+    Ok(Args {
+        mayu,
+        log,
+        test_mark,
+    })
 }
 
 /// エンジンが OS 側で押したままにしているキー。終了時にまとめて離す。
@@ -271,6 +304,12 @@ fn main() -> ExitCode {
 
     let (tx, rx) = channel::<Event>();
     TX.set(tx.clone()).expect("TX は一度だけ設定する");
+    TEST_MARK
+        .set(args.test_mark)
+        .expect("TEST_MARK は一度だけ設定する");
+    if let Some(m) = args.test_mark {
+        log!("テスト入力モード: 印 {m:#x} の注入入力を物理入力として扱う");
+    }
 
     // フック DLL からの通知を受けるメールスロット。DLL を入れる前に作る
     let mailslot = match Mailslot::create() {
@@ -382,7 +421,8 @@ mod tests {
             a(&["k.mayu"]),
             Ok(Args {
                 mayu: PathBuf::from("k.mayu"),
-                log: None
+                log: None,
+                test_mark: None,
             })
         );
     }
@@ -392,9 +432,44 @@ mod tests {
         let want = Ok(Args {
             mayu: PathBuf::from("k.mayu"),
             log: Some(PathBuf::from("n.log")),
+            test_mark: None,
         });
         assert_eq!(a(&["k.mayu", "--log", "n.log"]), want);
         assert_eq!(a(&["--log", "n.log", "k.mayu"]), want);
+    }
+
+    #[test]
+    fn test_input_は16進の印() {
+        let want = Ok(Args {
+            mayu: PathBuf::from("k.mayu"),
+            log: None,
+            test_mark: Some(0x6e6d),
+        });
+        assert_eq!(a(&["k.mayu", "--test-input", "0x6e6d"]), want);
+        assert_eq!(a(&["--test-input", "6E6D", "k.mayu"]), want);
+        assert_eq!(
+            a(&["k.mayu", "--log", "n.log", "--test-input", "0x1"]),
+            Ok(Args {
+                mayu: PathBuf::from("k.mayu"),
+                log: Some(PathBuf::from("n.log")),
+                test_mark: Some(1),
+            })
+        );
+    }
+
+    #[test]
+    fn test_input_の形が違えば使い方() {
+        assert_eq!(a(&["k.mayu", "--test-input"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["k.mayu", "--test-input", "0"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["k.mayu", "--test-input", "0x"]), Err(USAGE.to_string()));
+        assert_eq!(
+            a(&["k.mayu", "--test-input", "xyz"]),
+            Err(USAGE.to_string())
+        );
+        assert_eq!(
+            a(&["k.mayu", "--test-input", "1", "--test-input", "2"]),
+            Err(USAGE.to_string())
+        );
     }
 
     #[test]
