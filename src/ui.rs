@@ -15,21 +15,28 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, IDI_APPLICATION, LoadIconW,
-    MF_STRING, PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TrackPopupMenu,
-    WINDOW_EX_STYLE, WM_APP, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+    MF_CHECKED, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW, RegisterWindowMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
+    TrackPopupMenu, WINDOW_EX_STYLE, WM_APP, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
+    WS_OVERLAPPED,
 };
 use windows::core::{BOOL, w};
 
 /// メニューで選ばれたもの。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
+    /// 設定の再読込。
+    Reload,
+    /// 一時停止の切り替え。`true` なら停止、`false` なら再開。
+    Pause(bool),
     Exit,
 }
 
 /// トレイアイコンの通知が届くメッセージ。
 const WM_TRAY: u32 = WM_APP + 1;
 const ICON_ID: u32 = 1;
+const ID_RELOAD: usize = 1;
+const ID_PAUSE: usize = 2;
 const ID_EXIT: usize = 3;
 
 type Handler = Box<dyn FnMut(Command)>;
@@ -38,6 +45,8 @@ type Handler = Box<dyn FnMut(Command)>;
 struct State {
     handler: Handler,
     tip: String,
+    /// 一時停止中か。メニューの「一時停止」にチェックを付ける。
+    paused: bool,
     /// Explorer が立ち上がり直したときに届く `TaskbarCreated`。
     taskbar_created: u32,
 }
@@ -68,6 +77,7 @@ impl Tray {
         let mut state = Box::new(State {
             handler,
             tip: tip.to_string(),
+            paused: false,
             taskbar_created,
         });
         // SAFETY: 登録済みのクラス名。見せない窓なので位置・大きさは任せる。
@@ -141,14 +151,24 @@ fn add_icon(hwnd: HWND, tip: &str) -> bool {
 }
 
 /// メニューを出し、選ばれた項目を返す。何も選ばれなければ `None`。
-fn popup(hwnd: HWND) -> Option<Command> {
+fn popup(hwnd: HWND, paused: bool) -> Option<Command> {
     let mut pt = Default::default();
     // SAFETY: pt は有効な POINT。
     unsafe { GetCursorPos(&mut pt) }.ok()?;
     // SAFETY: 引数なし。
     let menu = unsafe { CreatePopupMenu() }.ok()?;
     // SAFETY: menu は今作ったメニュー。文字列は NUL 終端の定数。
-    let built = unsafe { AppendMenuW(menu, MF_STRING, ID_EXIT, w!("終了")) }.is_ok();
+    let pause_flags = if paused {
+        MF_STRING | MF_CHECKED
+    } else {
+        MF_STRING
+    };
+    let built = unsafe {
+        AppendMenuW(menu, MF_STRING, ID_RELOAD, w!("設定の再読込")).is_ok()
+            && AppendMenuW(menu, pause_flags, ID_PAUSE, w!("一時停止")).is_ok()
+            && AppendMenuW(menu, MF_SEPARATOR, 0, None).is_ok()
+            && AppendMenuW(menu, MF_STRING, ID_EXIT, w!("終了")).is_ok()
+    };
     let mut chosen = BOOL(0);
     if built {
         // SAFETY: hwnd は自分の窓。メニューを閉じるためにいったん前面に出す（MS の指示）。
@@ -169,6 +189,8 @@ fn popup(hwnd: HWND) -> Option<Command> {
     // SAFETY: 今作ったメニュー。
     let _ = unsafe { DestroyMenu(menu) };
     match chosen.0 as usize {
+        ID_RELOAD => Some(Command::Reload),
+        ID_PAUSE => Some(Command::Pause(!paused)),
         ID_EXIT => Some(Command::Exit),
         _ => None,
     }
@@ -187,8 +209,11 @@ unsafe extern "system" fn wnd_proc(
         if msg == WM_TRAY {
             let event = (lparam.0 & 0xffff) as u32;
             if (event == WM_RBUTTONUP || event == WM_LBUTTONUP)
-                && let Some(cmd) = popup(hwnd)
+                && let Some(cmd) = popup(hwnd, state.paused)
             {
+                if let Command::Pause(p) = cmd {
+                    state.paused = p;
+                }
                 (state.handler)(cmd);
             }
             return LRESULT(0);

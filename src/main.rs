@@ -11,13 +11,17 @@
 //! フック DLL（`newmayu_hook.dll`、同じフォルダ）が各プロセスから送る IME の状態も
 //! 同じキューに積み、エンジンに渡す。
 //!
-//! トレイのメニュー「終了」でメッセージループを抜け、フックを外し、エンジンが
-//! 押したままにしているキーを離し、フック DLL とアイコンを外して終わる。
+//! トレイのメニュー:
+//! - 「設定の再読込」: `.mayu` を読み直し、通ればエンジンを作り直す。通らなければ今のまま
+//! - 「一時停止」: フックのコールバックで何もせず次へ流す。もう一度で再開
+//! - 「終了」: メッセージループを抜け、フックを外し、エンジンが押したままにしている
+//!   キーを離し、フック DLL とアイコンを外して終わる
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::Duration;
@@ -48,6 +52,8 @@ enum Event {
     Key(Input),
     /// フック DLL からの通知。
     Notify(Notify),
+    /// 設定の再読込。エンジンを作り直す。
+    Reload(Box<Config>),
     /// 終了。押下中のキーを離してから `Sender` に知らせる。
     Quit(Sender<()>),
 }
@@ -56,15 +62,21 @@ enum Event {
 /// コールバックは C の関数でユーザーポインタを受け取れないため static に置く。
 static TX: OnceLock<Sender<Event>> = OnceLock::new();
 
+/// 一時停止中。コールバックは何もせず次のフックへ流す。
+static PAUSED: AtomicBool = AtomicBool::new(false);
+
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
+    if code == HC_ACTION as i32 && !PAUSED.load(Ordering::Relaxed) {
         // SAFETY: WH_KEYBOARD_LL では lparam は KBDLLHOOKSTRUCT を指す。
         let k = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         if let Some(input) = platform::input_from_hook(k) {
-            if let Some(tx) = TX.get() {
-                let _ = tx.send(Event::Key(input));
+            // エンジンスレッドが居なくなっていたら（送れなかったら）抑制せず流す。
+            // そうしないとキーボードが死ぬ。
+            if let Some(tx) = TX.get()
+                && tx.send(Event::Key(input)).is_ok()
+            {
+                return LRESULT(1);
             }
-            return LRESULT(1);
         }
     }
     // SAFETY: 引数はそのまま次のフックへ渡す。
@@ -150,6 +162,17 @@ fn engine_thread(config: Config, rx: Receiver<Event>) {
     let mut pressed = Pressed::default();
     for ev in rx {
         match ev {
+            Event::Reload(config) => {
+                // 前のエンジンが押したままのキーは離してから作り直す
+                let releases = pressed.releases();
+                if !releases.is_empty() {
+                    log!("再読込: 押下中のキーを離す {releases:?}");
+                    platform::send(&releases);
+                }
+                pressed = Pressed::default();
+                engine = Engine::new(*config);
+                log!("再読込: エンジンを作り直した");
+            }
             Event::Key(input) => {
                 let outputs = engine.feed(input);
                 log!("{input:?} -> {outputs:?}");
@@ -288,9 +311,22 @@ fn main() -> ExitCode {
     };
 
     // トレイ。メニューの操作はこのスレッド（メッセージループ）で届く。
+    let menu_tx = tx.clone();
+    let mayu = args.mayu.clone();
     let tray = match Tray::new(
         "newmayu",
         Box::new(move |cmd| match cmd {
+            Command::Reload => match parser::load(&mayu) {
+                Ok(c) => {
+                    log!("再読込: {}", mayu.display());
+                    let _ = menu_tx.send(Event::Reload(Box::new(c)));
+                }
+                Err(e) => log!("再読込に失敗。今の設定のまま: {e}"),
+            },
+            Command::Pause(p) => {
+                PAUSED.store(p, Ordering::Relaxed);
+                log!("{}", if p { "一時停止" } else { "再開" });
+            }
             Command::Exit => {
                 log!("終了");
                 // SAFETY: メッセージループを回しているスレッドから呼ぶ。
@@ -306,7 +342,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    log!("フック設置。トレイのメニューから終了できる。");
+    log!("フック設置。トレイのメニューから再読込・一時停止・終了できる。");
 
     let mut msg = MSG::default();
     // SAFETY: msg は有効な MSG。
