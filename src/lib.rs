@@ -7,6 +7,7 @@
 //! - `notify` : フック DLL（`newmayu-hook`）の読み込みと、そこから届く通知の受信
 //! - `window` : 窓を操作する `&関数`（`&WindowMove` など）の Win32 側
 //! - `log`    : ログ（時刻付き。標準エラーか `--log` のファイル）
+//! - `ui`     : タスクトレイのアイコンとメニュー
 
 pub mod config;
 pub mod engine;
@@ -14,4 +15,5 @@ pub mod log;
 pub mod model;
 pub mod notify;
 pub mod platform;
+pub mod ui;
 pub mod window;
