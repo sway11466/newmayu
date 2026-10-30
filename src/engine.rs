@@ -9,8 +9,13 @@
 //! 一致する `window` キーマップの列（yamy の `FocusOfThread::m_keymaps`）を持ち、
 //! 先頭から順に引く。割付が無いキーはそのキーマップの既定動作に落ちる
 //! （普通は `&KeymapParent` で親へ、`Global` は `&OtherWindowClass` で列の次へ）。
+//!
+//! 押したときに引いた動作列はキーごとに覚え、離しはそれを使って出す（yamy と違う点）。
+//! 押している間に修飾や鍵の状態（IME 変換中など）が変わって別の割付に当たっても、
+//! 押したときに出したキーが離されずに残らないようにするため。
+//! `D-` `U-` 付きの割付は yamy と同じく押しと離しで別々に引く。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::model::{
     Action, BasicMod, Config, Edge, EdgeSpec, Func, Key, KeymapId, LockMod, LockState, ModSpec,
@@ -84,6 +89,15 @@ enum Part {
     Up,
 }
 
+/// 押したときに [`Part::Down`] で出した動作列。離しはこれを [`Part::Up`] で出す。
+struct Held {
+    actions: Vec<Action>,
+    /// 動作列を引いたキーマップ（`&KeymapParent` の起点）。
+    keymap_id: KeymapId,
+    /// 押したときの持ち回り値。
+    cur: Current,
+}
+
 pub struct Engine {
     config: Config,
     /// 前景窓に一致する `window` キーマップの列（照合順）。先頭が通常の解決の起点。
@@ -96,6 +110,8 @@ pub struct Engine {
     is_prefix: bool,
     /// 物理的に押されているキー。
     pressed: HashSet<Key>,
+    /// 押したときに出した動作列（離しで使う）。
+    held: HashMap<Key, Held>,
     /// IME などの鍵の状態。外から `set_ime` で入る。分からないうちは全部オフ（yamy と同じ）。
     locks: LockState,
     /// OS に押したと伝えてまだ離していないキー。
@@ -115,6 +131,7 @@ impl Engine {
             current,
             is_prefix: false,
             pressed: HashSet::new(),
+            held: HashMap::new(),
             locks: LockState::empty(),
             win32_pressed: HashSet::new(),
             out: Vec::new(),
@@ -201,7 +218,15 @@ impl Engine {
             event_mods,
             focus_idx: 0,
         };
-        self.generate_keyboard_events(keymap_id, cur, edge, 0);
+        // 離しは、押したときに覚えた動作列があればそれを使う
+        let held = match edge {
+            Edge::Down => None,
+            Edge::Up => self.held.remove(&key),
+        };
+        match held {
+            Some(h) => self.generate_key_seq_events(&h.actions, Part::Up, h.keymap_id, h.cur, 0),
+            None => self.generate_keyboard_events(keymap_id, cur, edge, 0),
+        }
 
         if own_mod.is_none() {
             if !self.is_prefix {
@@ -262,6 +287,25 @@ impl Engine {
             Some(a) => (a.actions.clone(), part_of(a.edge)),
             None => (keymap.default_actions.clone(), part_of(EdgeSpec::Both)),
         };
+        // 離しで使う動作列を覚える。`&KeymapParent` 等で下に進んだ先が最終的に当たった動作列なので、
+        // 内側の呼び出しが外側の記録を上書きする。`D-` `U-` 付きの割付に当たったら覚えない
+        // （離しは改めて引く）。
+        match part {
+            Part::Down => {
+                self.held.insert(
+                    cur.key,
+                    Held {
+                        actions: actions.clone(),
+                        keymap_id,
+                        cur,
+                    },
+                );
+            }
+            Part::All => {
+                self.held.remove(&cur.key);
+            }
+            Part::Up => {}
+        }
         self.generate_key_seq_events(&actions, part, keymap_id, cur, depth);
     }
 
@@ -946,5 +990,52 @@ mod tests {
         // Child に A の割付は無く、親 Global の A = B が使われる
         assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
         assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+    }
+    #[test]
+    fn held_key_is_released_even_if_lock_state_changed() {
+        let (config, mut global) = base();
+        // key A = B / key IC-A = X
+        let d = LockSpec::assign_default();
+        global.assign(A, ModSpec::none(), EdgeSpec::Both, d, vec![Action::key(B)]);
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            d.with(LockMod::ImeComp),
+            vec![Action::key(X)],
+        );
+        let mut e = engine(config, vec![global]);
+
+        // H を押したままにして、全キー解放時の後始末で離されないようにする
+        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(H)]);
+        // 変換中でないときに押して B が出る。離す前に変換中になっても B が離される
+        e.set_ime(true, false);
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+        e.set_ime(true, true);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(H)]);
+    }
+
+    #[test]
+    fn held_key_is_released_even_if_composition_ended() {
+        let (config, mut global) = base();
+        let d = LockSpec::assign_default();
+        global.assign(A, ModSpec::none(), EdgeSpec::Both, d, vec![Action::key(B)]);
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            d.with(LockMod::ImeComp),
+            vec![Action::key(X)],
+        );
+        let mut e = engine(config, vec![global]);
+
+        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(H)]);
+        // 変換中に押して X が出る。離す前に変換が終わっても X が離される
+        e.set_ime(true, true);
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(X)]);
+        e.set_ime(true, false);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(X)]);
+        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(H)]);
     }
 }
