@@ -12,6 +12,7 @@
 //! def sync = SCANCODE                          # 読むだけ（&Sync は未対応）
 //! keymap NAME [: PARENT]                      # 同名の再宣言はそのキーマップに戻る
 //! key MODKEY... = ACTION...                    # ACTION = 修飾付きキー名 | $keyseq名 | ( ACTION... ) | &Prefix(KEYMAP) | &Default
+//!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）も書ける
 //! mod MODNAME (=|+=|-=) KEY...
 //! keyseq $NAME = ACTION...                     # 使う側で展開する
 //! ```
@@ -19,9 +20,10 @@
 //! 修飾の書き方は yamy の `load_MODIFIER` と同じ: `*` は直後の修飾（キー名の直前なら未指定の全部）を
 //! dontcare、`~` は離し。未指定の基本修飾（S- A- C- W-）は離し、M0-〜M9- は dontcare。
 //! `U-` `D-` は押し・離しの区別（両方または無指定なら両方）。
+//! 未指定の `IC-` は「変換中でない」を要求し（yamy の既定）、`IL-` は dontcare。
 //!
 //! これ以外（`window`、`keymap2`、`event`、`def option`、`def subst`、
-//! `&Prefix` `&Default` 以外の `&関数`、`!`/`!!`/`!!!`、IL- IC- NL- 等の割当修飾、2 個以上のスキャンコード）は
+//! `&Prefix` `&Default` 以外の `&関数`、`!`/`!!`/`!!!`、R- NL- CL- 等の割当修飾、2 個以上のスキャンコード）は
 //! エラーにする。
 //!
 //! ファイルは BOM 無し UTF-8 のみ。大文字小文字は区別しない。
@@ -32,7 +34,8 @@ use std::path::{Path, PathBuf};
 
 use super::lexer::{Line, Token, tokenize};
 use crate::model::{
-    Action, BasicMod, Config, EdgeSpec, Key, Keymap, KeymapId, ModSpec, ScanPrefix,
+    Action, BasicMod, Config, EdgeSpec, Key, Keymap, KeymapId, LockMod, LockSpec, ModSpec,
+    ScanPrefix,
 };
 
 /// 最大の include 深さ。循環 include もこれで止まる。
@@ -177,14 +180,25 @@ fn basic_mod_by_prefix(sym: &str) -> Option<BasicMod> {
 
 /// 読めるが未対応の修飾接頭辞（割当修飾・ロック類）。
 const UNSUPPORTED_MOD_PREFIXES: &[&str] = &[
-    "R-", "IL-", "IC-", "I-", "NL-", "CL-", "SL-", "KL-", "MAX-", "MIN-", "MMAX-", "MMIN-", "T-",
-    "TS-", "L0-", "L1-", "L2-", "L3-", "L4-", "L5-", "L6-", "L7-", "L8-", "L9-",
+    "R-", "NL-", "CL-", "SL-", "KL-", "MAX-", "MIN-", "MMAX-", "MMIN-", "T-", "TS-", "L0-", "L1-",
+    "L2-", "L3-", "L4-", "L5-", "L6-", "L7-", "L8-", "L9-",
 ];
+
+fn lock_mod_by_prefix(s: &str) -> Option<LockMod> {
+    match s {
+        "IL-" => Some(LockMod::ImeLock),
+        "IC-" | "I-" => Some(LockMod::ImeComp),
+        _ => None,
+    }
+}
 
 /// 修飾の解析結果。
 struct Modified {
     mods: ModSpec,
     edge: EdgeSpec,
+    locks: LockSpec,
+    /// `IL-` `IC-` が書かれていた。出力キー側では禁止なので、呼び手が見る。
+    locks_specified: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -639,7 +653,7 @@ impl Loader {
         let actions = self.load_actions(cur, false)?;
         let km = &mut self.keymaps[self.current].keymap;
         for (key, m) in lhs {
-            km.assign(key, m.mods, m.edge, actions.clone());
+            km.assign(key, m.mods, m.edge, m.locks, actions.clone());
         }
         Ok(())
     }
@@ -713,6 +727,9 @@ impl Loader {
         let mut out = Vec::new();
         while !cur.at_end() {
             let m = self.load_modifier(cur)?;
+            if m.locks_specified {
+                return self.err("IL- IC- は出力キーには付けられない");
+            }
             let Some(t) = cur.next() else {
                 return self.err("修飾の後にキー名が無い");
             };
@@ -773,12 +790,15 @@ impl Loader {
 
     /// 修飾の接頭辞列を読む。キー名の手前で止まる。yamy の `load_MODIFIER`。
     fn load_modifier(&mut self, cur: &mut Cur) -> Result<Modified> {
-        // 既定: 基本修飾は離し、M0-9 は dontcare、U-/D- は無指定
+        // 既定: 基本修飾は離し、M0-9 は dontcare、U-/D- は無指定、
+        //       IC- は「変換中でない」、IL- は dontcare
         let mut mods = ModSpec::none();
         for m in BasicMod::ALL.iter().skip(4) {
             mods = mods.dontcare(*m);
         }
         let mut specified = [false; BasicMod::ALL.len()];
+        let mut locks = LockSpec::assign_default();
+        let mut locks_specified = [false; LockMod::ALL.len()];
         let mut up: Option<Option<bool>> = None; // None=未指定, Some(None)=dontcare, Some(Some(b))
         let mut down: Option<Option<bool>> = None;
         let mut flag = Flag::Press;
@@ -792,6 +812,15 @@ impl Loader {
                     Flag::Dontcare => mods.dontcare(m),
                 };
                 specified[m.index()] = true;
+                flag = Flag::Press;
+            } else if let Some(m) = lock_mod_by_prefix(s) {
+                cur.next();
+                locks = match flag {
+                    Flag::Press => locks.with(m),
+                    Flag::Release => locks.without(m),
+                    Flag::Dontcare => locks.dontcare(m),
+                };
+                locks_specified[m.index()] = true;
                 flag = Flag::Press;
             } else if *s == "U-" || *s == "D-" {
                 cur.next();
@@ -826,6 +855,14 @@ impl Loader {
                     mods = match flag {
                         Flag::Release => mods.without(m),
                         _ => mods.dontcare(m),
+                    };
+                }
+            }
+            for m in LockMod::ALL {
+                if !locks_specified[m.index()] {
+                    locks = match flag {
+                        Flag::Release => locks.without(m),
+                        _ => locks.dontcare(m),
                     };
                 }
             }
@@ -865,7 +902,12 @@ impl Loader {
                 }
             }
         };
-        Ok(Modified { mods, edge })
+        Ok(Modified {
+            mods,
+            edge,
+            locks,
+            locks_specified: locks_specified.contains(&true),
+        })
     }
 
     // ---- 補助 ------------------------------------------------------------
@@ -963,7 +1005,7 @@ impl Loader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Assignment, Edge, ModState};
+    use crate::model::{Assignment, Edge, LockState, ModState};
 
     const KEYS: &str = "
         def key A = 0x1e
@@ -1220,10 +1262,44 @@ keymap Sub : Global"
     }
 
     #[test]
+    fn ime_modifiers() {
+        let c = load_ok(
+            "key A = B
+             key IC-H = B
+             key I-Space = B
+             key IL-BackSpace = B
+             key *IC-C-LShift = B
+             key *RShift = B
+             key ~IL-LControl = B
+             key ~*RControl = B",
+        );
+        let g = c.keymap(c.root);
+        let d = LockSpec::assign_default();
+        // 既定: 変換中でないことを要求、IME オンは問わない
+        assert!(!d.is_dontcare(LockMod::ImeComp) && !d.is_on(LockMod::ImeComp));
+        assert!(d.is_dontcare(LockMod::ImeLock));
+        assert_eq!(only(g, A).locks, d);
+        assert_eq!(only(g, H).locks, d.with(LockMod::ImeComp));
+        assert_eq!(only(g, SPACE).locks, d.with(LockMod::ImeComp));
+        assert_eq!(only(g, BS).locks, d.with(LockMod::ImeLock));
+        // `*IC-` は変換中かを問わない。基本修飾は普通に読む
+        let ls = only(g, LSHIFT);
+        assert_eq!(ls.locks, LockSpec::any());
+        assert_eq!(ls.mods, base().with(BasicMod::Control));
+        // キー名の直前の `*` は鍵の条件も全部 dontcare
+        assert_eq!(only(g, RSHIFT).locks, LockSpec::any());
+        assert_eq!(only(g, LCONTROL).locks, d.without(LockMod::ImeLock));
+        // `~*` はキー名の直前の `*` と同じで、全部 dontcare
+        assert_eq!(only(g, RCONTROL).locks, LockSpec::any());
+    }
+
+    #[test]
     fn later_assignment_wins() {
         let c = load_ok("key A = B\nkey A = H");
         let g = c.keymap(c.root);
-        let found = g.search(A, ModState::empty(), Edge::Down).unwrap();
+        let found = g
+            .search(A, ModState::empty(), LockState::empty(), Edge::Down)
+            .unwrap();
         assert_eq!(found.actions[0], Action::key_with(H, base()));
         assert_eq!(g.assignments.len(), 1);
     }
@@ -1273,7 +1349,9 @@ keymap Sub : Global"
                 .message
                 .contains("未対応")
         );
-        assert!(load_err("key IL-A = B").message.contains("未対応"));
+        assert!(load_err("key A = IL-B").message.contains("出力キー"));
+        assert!(load_err("key A = IC-B").message.contains("出力キー"));
+        assert!(load_err("key NL-A = B").message.contains("未対応"));
         assert!(load_err("mod !shift = A").message.contains("未対応"));
         assert!(load_err("key A = $Nothing").message.contains("未定義"));
         assert!(load_err("keymap X : Nowhere").message.contains("未定義"));

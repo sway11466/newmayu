@@ -3,7 +3,7 @@
 //! `.mayu` を読み込んだ結果はこのモジュールの型に落ちる。エンジンはこの型だけを見る。
 //! 修飾の表現は yamy に倣い「押下」「dontcare」の 2 本のビット列で持つ（照合が 1 行で済む）。
 //! yamy が一つの列挙に混ぜていた基本修飾（C- S- A- W- M0-9）とキーシーケンス修飾（D- U-）は
-//! 型を分ける。割当修飾（IL- IC- ロック類）はまだ扱わない。
+//! 型を分ける。割当修飾のうち鍵の状態で決まるもの（IL- IC-）は `LockMod` として別に持つ。
 
 /// スキャンコードの前置バイト。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -211,6 +211,102 @@ impl EdgeSpec {
     }
 }
 
+/// 鍵の状態で決まる割当修飾。割付の左辺にだけ書ける（出力キーには付かない）。
+/// yamy の `m_currentLock` に当たる。いまは IME の 2 つ。NL- CL- MAX- などもここに増える。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LockMod {
+    /// `IL-`: IME がオン。
+    ImeLock,
+    /// `IC-` `I-`: IME で変換中（未確定文字がある）。
+    ImeComp,
+}
+
+impl LockMod {
+    pub const ALL: [LockMod; 2] = [LockMod::ImeLock, LockMod::ImeComp];
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    const fn bit(self) -> u8 {
+        1 << self.index()
+    }
+}
+
+/// 鍵の現在の状態。エンジンが外（フック層）から受け取る。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct LockState(u8);
+
+impl LockState {
+    pub const fn empty() -> Self {
+        LockState(0)
+    }
+    pub fn set(&mut self, m: LockMod, on: bool) {
+        if on {
+            self.0 |= m.bit();
+        } else {
+            self.0 &= !m.bit();
+        }
+    }
+    pub const fn contains(self, m: LockMod) -> bool {
+        self.0 & m.bit() != 0
+    }
+}
+
+/// 鍵の条件。`ModSpec` と同じく「オン」「dontcare」の 2 本のビット列。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct LockSpec {
+    on: u8,
+    dontcare: u8,
+}
+
+impl LockSpec {
+    /// 全部オフであること。
+    pub const fn none() -> Self {
+        LockSpec { on: 0, dontcare: 0 }
+    }
+    /// 全部問わない。
+    pub const fn any() -> Self {
+        LockSpec {
+            on: 0,
+            dontcare: (1 << LockMod::ALL.len()) - 1,
+        }
+    }
+    /// yamy の割付の既定: IME 変換中でないことを要求し、他は問わない。
+    /// `key A = B` は変換中には効かず、効かせるには `*IC-` を付ける。
+    pub const fn assign_default() -> Self {
+        LockSpec::any().without(LockMod::ImeComp)
+    }
+    /// `IC-` のようにオンを要求する。
+    pub const fn with(mut self, m: LockMod) -> Self {
+        self.on |= m.bit();
+        self.dontcare &= !m.bit();
+        self
+    }
+    /// `~IC-` のようにオフを要求する。
+    pub const fn without(mut self, m: LockMod) -> Self {
+        self.on &= !m.bit();
+        self.dontcare &= !m.bit();
+        self
+    }
+    /// この鍵を問わない。
+    pub const fn dontcare(mut self, m: LockMod) -> Self {
+        self.dontcare |= m.bit();
+        self
+    }
+
+    pub const fn is_dontcare(self, m: LockMod) -> bool {
+        self.dontcare & m.bit() != 0
+    }
+    pub const fn is_on(self, m: LockMod) -> bool {
+        self.on & m.bit() != 0
+    }
+
+    pub const fn matches(self, state: LockState) -> bool {
+        (self.on | self.dontcare) == (state.0 | self.dontcare)
+    }
+}
+
 /// キーマップの識別子（`Config::keymaps` の添字）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct KeymapId(pub usize);
@@ -254,6 +350,7 @@ pub struct Assignment {
     pub key: Key,
     pub mods: ModSpec,
     pub edge: EdgeSpec,
+    pub locks: LockSpec,
     pub actions: Vec<Action>,
 }
 
@@ -290,12 +387,19 @@ impl Keymap {
     /// `key 修飾-キー = 動作…`
     ///
     /// 後に書いた割付が先に照合される（yamy の `addAssignment` は先頭に挿入する）。
-    /// キー・修飾・押し離しが同じ割付があれば置き換える。
-    pub fn assign(&mut self, key: Key, mods: ModSpec, edge: EdgeSpec, actions: Vec<Action>) {
+    /// キー・修飾・押し離し・鍵の条件が同じ割付があれば置き換える。
+    pub fn assign(
+        &mut self,
+        key: Key,
+        mods: ModSpec,
+        edge: EdgeSpec,
+        locks: LockSpec,
+        actions: Vec<Action>,
+    ) {
         if let Some(a) = self
             .assignments
             .iter_mut()
-            .find(|a| a.key == key && a.mods == mods && a.edge == edge)
+            .find(|a| a.key == key && a.mods == mods && a.edge == edge && a.locks == locks)
         {
             a.actions = actions;
             return;
@@ -306,6 +410,7 @@ impl Keymap {
                 key,
                 mods,
                 edge,
+                locks,
                 actions,
             },
         );
@@ -320,10 +425,16 @@ impl Keymap {
 
     /// このキーマップ内だけで割付を探す（親は見ない。yamy の `Keymap::searchAssignment`）。
     /// 同じ組に複数当たるときは先に書かれたものを返す。
-    pub fn search(&self, key: Key, mods: ModState, edge: Edge) -> Option<&Assignment> {
-        self.assignments
-            .iter()
-            .find(|a| a.key == key && a.mods.matches(mods) && a.edge.matches(edge))
+    pub fn search(
+        &self,
+        key: Key,
+        mods: ModState,
+        locks: LockState,
+        edge: Edge,
+    ) -> Option<&Assignment> {
+        self.assignments.iter().find(|a| {
+            a.key == key && a.mods.matches(mods) && a.locks.matches(locks) && a.edge.matches(edge)
+        })
     }
 }
 

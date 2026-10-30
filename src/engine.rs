@@ -7,7 +7,9 @@
 
 use std::collections::HashSet;
 
-use crate::model::{Action, BasicMod, Config, Edge, EdgeSpec, Key, KeymapId, ModSpec, ModState};
+use crate::model::{
+    Action, BasicMod, Config, Edge, EdgeSpec, Key, KeymapId, LockMod, LockState, ModSpec, ModState,
+};
 
 /// フックから届く 1 イベント。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +62,8 @@ pub struct Engine {
     is_prefix: bool,
     /// 物理的に押されているキー。
     pressed: HashSet<Key>,
+    /// IME などの鍵の状態。外から `set_ime` で入る。分からないうちは全部オフ（yamy と同じ）。
+    locks: LockState,
     /// OS に押したと伝えてまだ離していないキー。
     win32_pressed: HashSet<Key>,
     out: Vec<Output>,
@@ -73,6 +77,7 @@ impl Engine {
             current,
             is_prefix: false,
             pressed: HashSet::new(),
+            locks: LockState::empty(),
             win32_pressed: HashSet::new(),
             out: Vec::new(),
         }
@@ -80,6 +85,12 @@ impl Engine {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// IME の状態を入れる。`on` は IME がオン（`IL-`）、`composing` は変換中（`IC-`）。
+    pub fn set_ime(&mut self, on: bool, composing: bool) {
+        self.locks.set(LockMod::ImeLock, on);
+        self.locks.set(LockMod::ImeComp, composing);
     }
 
     /// 1 イベントを処理し、OS に出すイベント列を返す。
@@ -167,8 +178,9 @@ impl Engine {
         if depth >= MAX_KEYMAP_RECURSION {
             return;
         }
+        let locks = self.locks;
         let keymap = self.config.keymap(keymap_id);
-        match keymap.search(key, state, edge) {
+        match keymap.search(key, state, locks, edge) {
             Some(a) => {
                 let part = match a.edge {
                     EdgeSpec::Both => match edge {
@@ -300,7 +312,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Action, Keymap};
+    use crate::model::{Action, Keymap, LockSpec};
 
     // 109.mayu のスキャンコード
     const A: Key = Key::plain(0x1e);
@@ -334,7 +346,13 @@ mod tests {
     fn simple_remap_a_to_b() {
         let (config, mut global) = base();
         // key A = B
-        global.assign(A, ModSpec::none(), EdgeSpec::Both, vec![Action::key(B)]);
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::key(B)],
+        );
         let mut e = engine(config, vec![global]);
 
         assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
@@ -358,6 +376,7 @@ mod tests {
             H,
             ModSpec::none().with(BasicMod::Control),
             EdgeSpec::Both,
+            LockSpec::any(),
             vec![Action::key(BACK_SPACE)],
         );
         let mut e = engine(config, vec![global]);
@@ -391,6 +410,7 @@ mod tests {
             CAPS_LOCK,
             ModSpec::any(),
             EdgeSpec::Both,
+            LockSpec::any(),
             vec![Action::key_with(L_CONTROL, ModSpec::any())],
         );
         // key C-H = BackSpace
@@ -398,6 +418,7 @@ mod tests {
             H,
             ModSpec::none().with(BasicMod::Control),
             EdgeSpec::Both,
+            LockSpec::any(),
             vec![Action::key(BACK_SPACE)],
         );
         let mut e = engine(config, vec![global]);
@@ -433,13 +454,20 @@ mod tests {
             X,
             ModSpec::none().with(BasicMod::Control),
             EdgeSpec::Both,
+            LockSpec::any(),
             vec![Action::Prefix(cx)],
         );
         // keymap EmacsC-X : Global: key F = Right
         let mut emacs_cx = Keymap::new("EmacsC-X", Some(GLOBAL));
         emacs_cx.add_mod_key(BasicMod::Control, L_CONTROL);
         emacs_cx.add_mod_key(BasicMod::Control, R_CONTROL);
-        emacs_cx.assign(F, ModSpec::none(), EdgeSpec::Both, vec![Action::key(RIGHT)]);
+        emacs_cx.assign(
+            F,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::key(RIGHT)],
+        );
         let mut e = engine(config, vec![global, emacs_cx]);
 
         assert_eq!(
@@ -473,11 +501,18 @@ mod tests {
     fn default_action_passes_the_physical_key_through() {
         let (mut config, mut global) = base();
         // 子キーマップで C-A を &Default にすると、親の A→B を通らず A がそのまま出る
-        global.assign(A, ModSpec::none(), EdgeSpec::Both, vec![Action::key(B)]);
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::key(B)],
+        );
         global.assign(
             A,
             ModSpec::none().with(BasicMod::Control),
             EdgeSpec::Both,
+            LockSpec::any(),
             vec![Action::Default],
         );
         config.def_mod(BasicMod::Control, [L_CONTROL]);
@@ -497,14 +532,64 @@ mod tests {
     }
 
     #[test]
+    fn ime_state_selects_assignment() {
+        let (config, mut global) = base();
+        // key A = B        （既定: 変換中でないとき）
+        // key IC-A = X     （変換中）
+        // key IL-F = Right （IME オン）
+        let d = LockSpec::assign_default();
+        global.assign(A, ModSpec::none(), EdgeSpec::Both, d, vec![Action::key(B)]);
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            d.with(LockMod::ImeComp),
+            vec![Action::key(X)],
+        );
+        global.assign(
+            F,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            d.with(LockMod::ImeLock),
+            vec![Action::key(RIGHT)],
+        );
+        let mut e = engine(config, vec![global]);
+
+        // 状態が分からないうちは IME オフ・変換中でない扱い
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+        assert_eq!(e.feed(Input::down(F)), vec![Output::Press(F)]);
+        assert_eq!(e.feed(Input::up(F)), vec![Output::Release(F)]);
+
+        // IME オン・変換中でない
+        e.set_ime(true, false);
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+        assert_eq!(e.feed(Input::down(F)), vec![Output::Press(RIGHT)]);
+        assert_eq!(e.feed(Input::up(F)), vec![Output::Release(RIGHT)]);
+
+        // 変換中: 既定の割付は効かず、IC- の割付が効く
+        e.set_ime(true, true);
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(X)]);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(X)]);
+    }
+
+    #[test]
     fn child_keymap_falls_back_to_parent() {
         let (config, mut global) = base();
         let child = KeymapId(1);
-        global.assign(A, ModSpec::none(), EdgeSpec::Both, vec![Action::key(B)]);
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::key(B)],
+        );
         global.assign(
             X,
             ModSpec::none(),
             EdgeSpec::Both,
+            LockSpec::any(),
             vec![Action::Prefix(child)],
         );
         let mut c = Keymap::new("Child", Some(GLOBAL));
