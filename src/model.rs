@@ -227,6 +227,8 @@ pub enum Action {
     },
     /// `&Prefix(キーマップ)`: 次の 1 キーだけ指定キーマップで解決する。
     Prefix(KeymapId),
+    /// `&Default`: 押された物理キーをそのまま出す（割付が無いときと同じ）。
+    Default,
 }
 
 impl Action {

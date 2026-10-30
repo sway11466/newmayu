@@ -178,7 +178,7 @@ impl Engine {
                     EdgeSpec::Down | EdgeSpec::Up => Part::All,
                 };
                 let actions = a.actions.clone();
-                self.generate_key_seq_events(&actions, part, event_mods);
+                self.generate_key_seq_events(&actions, part, key, event_mods);
             }
             None => match keymap.parent {
                 Some(parent) => {
@@ -189,7 +189,8 @@ impl Engine {
         }
     }
 
-    /// 割付の無いキーをそのまま通す（yamy の &Default）。
+    /// 割付の無いキー、または `&Default` の動作: 物理キーをそのまま通す。
+    /// 修飾は入力時の状態（自分が修飾キーなら dontcare）に揃える。
     fn generate_default(&mut self, key: Key, event_mods: ModSpec, edge: Edge) {
         match edge {
             Edge::Down => {
@@ -200,25 +201,38 @@ impl Engine {
         }
     }
 
-    fn generate_key_seq_events(&mut self, actions: &[Action], part: Part, event_mods: ModSpec) {
+    /// `key` は割付を引いた物理キー（`&Default` が使う）。
+    fn generate_key_seq_events(
+        &mut self,
+        actions: &[Action],
+        part: Part,
+        key: Key,
+        event_mods: ModSpec,
+    ) {
         let Some((last, head)) = actions.split_last() else {
             return;
         };
         if part == Part::Up {
-            self.generate_action_events(last, Edge::Up, event_mods);
+            self.generate_action_events(last, Edge::Up, key, event_mods);
             return;
         }
         for a in head {
-            self.generate_action_events(a, Edge::Down, event_mods);
-            self.generate_action_events(a, Edge::Up, event_mods);
+            self.generate_action_events(a, Edge::Down, key, event_mods);
+            self.generate_action_events(a, Edge::Up, key, event_mods);
         }
-        self.generate_action_events(last, Edge::Down, event_mods);
+        self.generate_action_events(last, Edge::Down, key, event_mods);
         if part == Part::All {
-            self.generate_action_events(last, Edge::Up, event_mods);
+            self.generate_action_events(last, Edge::Up, key, event_mods);
         }
     }
 
-    fn generate_action_events(&mut self, action: &Action, edge: Edge, event_mods: ModSpec) {
+    fn generate_action_events(
+        &mut self,
+        action: &Action,
+        edge: Edge,
+        key: Key,
+        event_mods: ModSpec,
+    ) {
         match action {
             Action::Key {
                 key,
@@ -243,6 +257,7 @@ impl Engine {
                     self.is_prefix = true;
                 }
             }
+            Action::Default => self.generate_default(key, event_mods, edge),
         }
     }
 
@@ -452,6 +467,33 @@ mod tests {
         // 前置が解けた後の F は素通し
         assert_eq!(e.feed(Input::down(F)), vec![Output::Press(F)]);
         assert_eq!(e.feed(Input::up(F)), vec![Output::Release(F)]);
+    }
+
+    #[test]
+    fn default_action_passes_the_physical_key_through() {
+        let (mut config, mut global) = base();
+        // 子キーマップで C-A を &Default にすると、親の A→B を通らず A がそのまま出る
+        global.assign(A, ModSpec::none(), EdgeSpec::Both, vec![Action::key(B)]);
+        global.assign(
+            A,
+            ModSpec::none().with(BasicMod::Control),
+            EdgeSpec::Both,
+            vec![Action::Default],
+        );
+        config.def_mod(BasicMod::Control, [L_CONTROL]);
+        let mut e = engine(config, vec![global]);
+        assert_eq!(
+            e.feed(Input::down(L_CONTROL)),
+            vec![Output::Press(L_CONTROL)]
+        );
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(A)]);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(A)]);
+        assert_eq!(
+            e.feed(Input::up(L_CONTROL)),
+            vec![Output::Release(L_CONTROL)]
+        );
+        // 修飾なしの A は割付どおり B
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
     }
 
     #[test]

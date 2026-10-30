@@ -11,7 +11,7 @@
 //! def alias NAME = KEY
 //! def sync = SCANCODE                          # 読むだけ（&Sync は未対応）
 //! keymap NAME [: PARENT]                      # 同名の再宣言はそのキーマップに戻る
-//! key MODKEY... = ACTION...                    # ACTION = 修飾付きキー名 | $keyseq名 | ( ACTION... ) | &Prefix(KEYMAP)
+//! key MODKEY... = ACTION...                    # ACTION = 修飾付きキー名 | $keyseq名 | ( ACTION... ) | &Prefix(KEYMAP) | &Default
 //! mod MODNAME (=|+=|-=) KEY...
 //! keyseq $NAME = ACTION...                     # 使う側で展開する
 //! ```
@@ -21,7 +21,7 @@
 //! `U-` `D-` は押し・離しの区別（両方または無指定なら両方）。
 //!
 //! これ以外（`window`、`keymap2`、`event`、`def option`、`def subst`、
-//! `&Prefix` 以外の `&関数`、`!`/`!!`/`!!!`、IL- IC- NL- 等の割当修飾、2 個以上のスキャンコード）は
+//! `&Prefix` `&Default` 以外の `&関数`、`!`/`!!`/`!!!`、IL- IC- NL- 等の割当修飾、2 個以上のスキャンコード）は
 //! エラーにする。
 //!
 //! ファイルは BOM 無し UTF-8 のみ。大文字小文字は区別しない。
@@ -737,6 +737,10 @@ impl Loader {
                         return self.err("`&` の後は関数名");
                     };
                     let fname = self.name_of(t)?;
+                    if fname.eq_ignore_ascii_case("Default") {
+                        out.push(Action::Default);
+                        continue;
+                    }
                     if !fname.eq_ignore_ascii_case("Prefix") {
                         return self.err(format!("`&{fname}` は未対応"));
                     }
@@ -1090,7 +1094,8 @@ mod tests {
              keymap Sub
               key B = A
              keymap Main
-              key A = $capslock ( B H ) &Prefix(Sub)",
+              key A = $capslock ( B H ) &Prefix(Sub)
+              key C-B = &default",
         );
         let main = &c.keymaps[2];
         assert_eq!(main.name, "Main");
@@ -1105,6 +1110,9 @@ mod tests {
                 Action::Prefix(sub_id),
             ]
         );
+        let cb = only(main, B);
+        assert!(cb.mods.is_pressed(BasicMod::Control));
+        assert_eq!(cb.actions, vec![Action::Default]);
     }
 
     #[test]
@@ -1260,7 +1268,11 @@ keymap Sub : Global"
         assert!(e.message.contains("2 個以上"), "{e}");
         assert_eq!(e.line, KEYS.lines().count() + 1);
         assert!(load_err("key Z = A").message.contains("未定義"));
-        assert!(load_err("key A = &Default").message.contains("未対応"));
+        assert!(
+            load_err("key A = &WindowMove(1, 0)")
+                .message
+                .contains("未対応")
+        );
         assert!(load_err("key IL-A = B").message.contains("未対応"));
         assert!(load_err("mod !shift = A").message.contains("未対応"));
         assert!(load_err("key A = $Nothing").message.contains("未定義"));
