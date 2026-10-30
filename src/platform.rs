@@ -135,6 +135,6 @@ pub fn send(outputs: &[Output]) {
     // SAFETY: `inputs` は有効な INPUT 配列で、サイズも正しく渡している。
     let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
     if sent as usize != inputs.len() {
-        eprintln!("SendInput: {} / {} 件しか送れなかった", sent, inputs.len());
+        crate::log!("SendInput: {} / {} 件しか送れなかった", sent, inputs.len());
     }
 }

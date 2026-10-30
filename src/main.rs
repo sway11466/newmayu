@@ -1,8 +1,10 @@
 //! PoC: フックを張り、`.mayu` の設定でキーを差し替える。
 //!
 //! ```text
-//! newmayu <file.mayu>
+//! newmayu <file.mayu> [--log <path>]
 //! ```
+//!
+//! `--log` があればログをそのファイルに追記する。無ければ標準エラー。
 //!
 //! 保険（PoC 専用）:
 //! - 起動から 60 秒で必ず終了する
@@ -13,7 +15,7 @@
 //! フック DLL（`newmayu_hook.dll`、同じフォルダ）が各プロセスから送る IME の状態も
 //! 同じキューに積み、エンジンに渡す。
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::sync::mpsc::{Sender, channel};
@@ -28,6 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use newmayu::config::parser;
 use newmayu::engine::{Engine, Input};
+use newmayu::log;
 use newmayu::model::LockMod;
 use newmayu::notify::{HookDll, Mailslot};
 use newmayu::platform;
@@ -57,7 +60,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
         // 保険: 物理 Esc で即終了。プロセスが消えればフックも外れる。
         if k.scanCode == ESC_SCAN && !k.flags.contains(LLKHF_INJECTED) {
-            eprintln!("Esc: 終了");
+            log!("Esc: 終了");
             std::process::exit(0);
         }
 
@@ -72,19 +75,57 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
+/// コマンドライン引数。
+#[derive(Debug, PartialEq, Eq)]
+struct Args {
+    mayu: PathBuf,
+    log: Option<PathBuf>,
+}
+
+const USAGE: &str = "使い方: newmayu <file.mayu> [--log <path>]";
+
+/// プログラム名を除いた引数を読む。形が違えば `Err(使い方)`。
+fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
+    let mut mayu = None;
+    let mut log = None;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        if a == "--log" {
+            match (it.next(), &log) {
+                (Some(p), None) => log = Some(PathBuf::from(p)),
+                _ => return Err(USAGE.to_string()),
+            }
+        } else if mayu.is_none() && !a.starts_with("--") {
+            mayu = Some(PathBuf::from(a));
+        } else {
+            return Err(USAGE.to_string());
+        }
+    }
+    let mayu = mayu.ok_or_else(|| USAGE.to_string())?;
+    Ok(Args { mayu, log })
+}
+
 fn main() -> ExitCode {
-    let Some(path) = std::env::args().nth(1) else {
-        eprintln!("使い方: newmayu <file.mayu>");
-        return ExitCode::FAILURE;
-    };
-    let config = match parser::load(Path::new(&path)) {
-        Ok(c) => c,
+    let args = match parse_args(std::env::args().skip(1)) {
+        Ok(a) => a,
         Err(e) => {
             eprintln!("{e}");
             return ExitCode::FAILURE;
         }
     };
-    eprintln!(
+    if let Err(e) = log::init(args.log.as_deref()) {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    let path = args.mayu.display().to_string();
+    let config = match parser::load(&args.mayu) {
+        Ok(c) => c,
+        Err(e) => {
+            log!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    log!(
         "{path}: キーマップ {} 個、割付 {} 件",
         config.keymaps.len(),
         config
@@ -101,7 +142,7 @@ fn main() -> ExitCode {
     let mailslot = match Mailslot::create() {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("{e}");
+            log!("{e}");
             return ExitCode::FAILURE;
         }
     };
@@ -116,7 +157,7 @@ fn main() -> ExitCode {
     // 保険: 自動終了
     thread::spawn(|| {
         thread::sleep(Duration::from_secs(AUTO_EXIT_SECS));
-        eprintln!("{AUTO_EXIT_SECS} 秒経過: 終了");
+        log!("{AUTO_EXIT_SECS} 秒経過: 終了");
         std::process::exit(0);
     });
 
@@ -128,7 +169,7 @@ fn main() -> ExitCode {
             match ev {
                 Event::Key(input) => {
                     let outputs = engine.feed(input);
-                    eprintln!("{input:?} -> {outputs:?}");
+                    log!("{input:?} -> {outputs:?}");
                     platform::send(&outputs);
                     window_ops.run(&outputs);
                 }
@@ -136,7 +177,7 @@ fn main() -> ExitCode {
                     let h = n.header;
                     match h.kind {
                         Kind::Lock => {
-                            eprintln!(
+                            log!(
                                 "IME: on={} 変換中={} NL={} CL={} SL={} KL={} (thread={} hwnd={:#x} cause={})",
                                 h.ime_open(),
                                 h.ime_composing(),
@@ -166,9 +207,14 @@ fn main() -> ExitCode {
                                 .iter()
                                 .map(|k| engine.config().keymap(*k).name.as_str())
                                 .collect();
-                            eprintln!(
+                            log!(
                                 "FOCUS: {} | {} (thread={} hwnd={:#x} cause={}) -> {:?}",
-                                n.class, n.title, h.thread_id, h.hwnd, h.cause, names
+                                n.class,
+                                n.title,
+                                h.thread_id,
+                                h.hwnd,
+                                h.cause,
+                                names
                             );
                         }
                     }
@@ -181,7 +227,7 @@ fn main() -> ExitCode {
     let hook_dll = match HookDll::install() {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("{e}");
+            log!("{e}");
             return ExitCode::FAILURE;
         }
     };
@@ -190,7 +236,7 @@ fn main() -> ExitCode {
     // SAFETY: hook_proc は WH_KEYBOARD_LL の規約どおりの関数。
     let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
         .expect("SetWindowsHookEx に失敗");
-    eprintln!("フック設置。Esc で即終了、{AUTO_EXIT_SECS} 秒で自動終了。");
+    log!("フック設置。Esc で即終了、{AUTO_EXIT_SECS} 秒で自動終了。");
 
     let mut msg = MSG::default();
     // SAFETY: msg は有効な MSG。
@@ -200,4 +246,47 @@ fn main() -> ExitCode {
     let _ = unsafe { UnhookWindowsHookEx(hook) };
     drop(hook_dll);
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn a(v: &[&str]) -> Result<Args, String> {
+        parse_args(v.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn mayu_だけ() {
+        assert_eq!(
+            a(&["k.mayu"]),
+            Ok(Args {
+                mayu: PathBuf::from("k.mayu"),
+                log: None
+            })
+        );
+    }
+
+    #[test]
+    fn log_は前でも後でもよい() {
+        let want = Ok(Args {
+            mayu: PathBuf::from("k.mayu"),
+            log: Some(PathBuf::from("n.log")),
+        });
+        assert_eq!(a(&["k.mayu", "--log", "n.log"]), want);
+        assert_eq!(a(&["--log", "n.log", "k.mayu"]), want);
+    }
+
+    #[test]
+    fn 形が違えば使い方() {
+        assert_eq!(a(&[]), Err(USAGE.to_string()));
+        assert_eq!(a(&["--log"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["k.mayu", "--log"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["a.mayu", "b.mayu"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["--foo", "a.mayu"]), Err(USAGE.to_string()));
+        assert_eq!(
+            a(&["k.mayu", "--log", "a", "--log", "b"]),
+            Err(USAGE.to_string())
+        );
+    }
 }
