@@ -71,6 +71,7 @@ pub fn send(outputs: &[Output]) {
         .filter_map(|o| match o {
             Output::Press(k) => keybd_input(*k, false),
             Output::Release(k) => keybd_input(*k, true),
+            Output::Func { .. } => None,
         })
         .collect();
     if inputs.is_empty() {

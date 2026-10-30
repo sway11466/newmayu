@@ -30,6 +30,7 @@ use newmayu::config::parser;
 use newmayu::engine::{Engine, Input};
 use newmayu::notify::{HookDll, Mailslot};
 use newmayu::platform;
+use newmayu::window::WindowOps;
 use newmayu_ipc::{Kind, Notify};
 
 const AUTO_EXIT_SECS: u64 = 60;
@@ -119,12 +120,14 @@ fn main() -> ExitCode {
     // エンジンスレッド
     thread::spawn(move || {
         let mut engine = Engine::new(config);
+        let mut window_ops = WindowOps::new();
         for ev in rx {
             match ev {
                 Event::Key(input) => {
                     let outputs = engine.feed(input);
                     eprintln!("{input:?} -> {outputs:?}");
                     platform::send(&outputs);
+                    window_ops.run(&outputs);
                 }
                 Event::Notify(n) => {
                     let h = n.header;

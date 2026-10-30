@@ -411,6 +411,104 @@ pub enum Action {
     /// `&OtherWindowClass`: いまの窓に一致する次の `window` キーマップで引き直す。
     /// 次が無ければ `&Default`。`Global` の既定動作。
     OtherWindowClass,
+    /// OS 側で実行する関数（窓の操作・マウス移動）。押したときだけ動く。
+    Func(Func),
+}
+
+/// 窓の関数の対象（yamy の `TargetWindowType`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// 最上位の窓（既定）。
+    Overlapped,
+    /// MDI 子窓。無ければ最上位の窓。
+    Mdi,
+}
+
+/// 窓を寄せる向き（yamy の `GravityType`）。`&WindowClingToLeft` は `West`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gravity {
+    Center,
+    North,
+    East,
+    West,
+    South,
+    NorthWest,
+    NorthEast,
+    SouthWest,
+    SouthEast,
+}
+
+impl Gravity {
+    pub const fn north(self) -> bool {
+        matches!(
+            self,
+            Gravity::North | Gravity::NorthWest | Gravity::NorthEast
+        )
+    }
+    pub const fn south(self) -> bool {
+        matches!(
+            self,
+            Gravity::South | Gravity::SouthWest | Gravity::SouthEast
+        )
+    }
+    pub const fn east(self) -> bool {
+        matches!(
+            self,
+            Gravity::East | Gravity::NorthEast | Gravity::SouthEast
+        )
+    }
+    pub const fn west(self) -> bool {
+        matches!(
+            self,
+            Gravity::West | Gravity::NorthWest | Gravity::SouthWest
+        )
+    }
+}
+
+/// OS 側で実行する `&関数`。エンジンは `Output::Func` に乗せて返すだけで、実行は `window` モジュール。
+/// 引数の既定値は yamy と同じ（対象は `Overlapped`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Func {
+    /// `&WindowRaise([対象])`: Z 順の先頭へ。
+    WindowRaise(Target),
+    /// `&WindowLower([対象])`: Z 順の末尾へ。
+    WindowLower(Target),
+    /// `&WindowMinimize([対象])`: 最小化と復元のトグル。
+    WindowMinimize(Target),
+    /// `&WindowMaximize([対象])`: 最大化と復元のトグル。
+    WindowMaximize(Target),
+    /// `&WindowHMaximize([対象])`: 横だけ最大化のトグル。
+    WindowHMaximize(Target),
+    /// `&WindowVMaximize([対象])`: 縦だけ最大化のトグル。
+    WindowVMaximize(Target),
+    /// `&WindowMove(dx, dy [, 対象])`: 相対移動。
+    WindowMove { dx: i32, dy: i32, target: Target },
+    /// `&WindowMoveTo(向き, dx, dy [, 対象])`: 作業領域の端に寄せてから dx, dy だけずらす。
+    /// `&WindowClingToLeft` 等はこれの `(West, 0, 0)` 等。
+    WindowMoveTo {
+        gravity: Gravity,
+        dx: i32,
+        dy: i32,
+        target: Target,
+    },
+    /// `&WindowMoveVisibly([対象])`: 作業領域からはみ出た分を戻す。
+    WindowMoveVisibly(Target),
+    /// `&WindowClose([対象])`: 閉じる。
+    WindowClose(Target),
+    /// `&WindowToggleTopMost`: 最前面の切替。
+    WindowToggleTopMost,
+    /// `&WindowSetAlpha(n)`: 半透明化のトグル（n は 0〜100 の不透明度）。n < 0 で全部戻す。
+    WindowSetAlpha(i32),
+    /// `&WindowRedraw`: 再描画。
+    WindowRedraw,
+    /// `&WindowResizeTo(幅, 高さ [, 対象])`: 0 はそのまま、負なら作業領域からの差。
+    WindowResizeTo {
+        width: i32,
+        height: i32,
+        target: Target,
+    },
+    /// `&MouseMove(dx, dy)`: マウスカーソルの相対移動。
+    MouseMove { dx: i32, dy: i32 },
 }
 
 impl Action {

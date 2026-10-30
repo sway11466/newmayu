@@ -13,7 +13,8 @@
 use std::collections::HashSet;
 
 use crate::model::{
-    Action, BasicMod, Config, Edge, EdgeSpec, Key, KeymapId, LockMod, LockState, ModSpec, ModState,
+    Action, BasicMod, Config, Edge, EdgeSpec, Func, Key, KeymapId, LockMod, LockState, ModSpec,
+    ModState,
 };
 
 /// フックから届く 1 イベント。
@@ -43,6 +44,11 @@ impl Input {
 pub enum Output {
     Press(Key),
     Release(Key),
+    /// 窓の操作など、OS 側で実行する関数。`hwnd` はそのときのフォーカス窓。
+    Func {
+        hwnd: u64,
+        func: Func,
+    },
 }
 
 /// キーマップ木の探索が戻らないときの上限（yamy と同じ 64）。
@@ -326,6 +332,14 @@ impl Engine {
                 Some(parent) => self.generate_keyboard_events(parent, cur, edge, depth + 1),
                 None => self.generate_default(key, event_mods, edge),
             },
+            Action::Func(f) => {
+                if edge == Edge::Down {
+                    self.out.push(Output::Func {
+                        hwnd: self.focus_hwnd,
+                        func: *f,
+                    });
+                }
+            }
             Action::OtherWindowClass => {
                 let next = cur.focus_idx + 1;
                 match self.focus.get(next) {
@@ -718,6 +732,40 @@ mod tests {
         assert_eq!(e.feed(Input::down(H)), vec![Output::Press(H)]);
         e.feed(Input::up(H));
         assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+    }
+
+    #[test]
+    fn func_is_output_on_press_with_focus_window() {
+        use crate::model::Target;
+        let (config, mut global) = base();
+        // key C-X = &WindowMove(16, 0)
+        let f = Func::WindowMove {
+            dx: 16,
+            dy: 0,
+            target: Target::Overlapped,
+        };
+        global.assign(
+            X,
+            ModSpec::none().with(BasicMod::Control),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::Func(f)],
+        );
+        let mut e = engine(config, vec![global]);
+        e.set_focus(0x1234, "x.exe:A", "");
+        assert_eq!(
+            e.feed(Input::down(L_CONTROL)),
+            vec![Output::Press(L_CONTROL)]
+        );
+        assert_eq!(
+            e.feed(Input::down(X)),
+            vec![Output::Func {
+                hwnd: 0x1234,
+                func: f
+            }]
+        );
+        // 離しでは何も出ない
+        assert_eq!(e.feed(Input::up(X)), vec![]);
     }
 
     #[test]

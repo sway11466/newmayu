@@ -16,6 +16,7 @@
 //!                                              # WINDOW = /クラス/ | ( /クラス/ && /タイトル/ ) | ( /クラス/ || /タイトル/ )
 //! key MODKEY... = ACTION...                    # ACTION = 修飾付きキー名 | $keyseq名 | ( ACTION... ) | &Prefix(KEYMAP)
 //!                                              #        | &Default | &KeymapParent | &OtherWindowClass
+//!                                              #        | &Window…([引数]) | &MouseMove(dx, dy)   （model::Func 参照）
 //!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）も書ける
 //! mod MODNAME (=|+=|-=) KEY...
 //! keyseq $NAME = ACTION...                     # 使う側で展開する
@@ -37,8 +38,8 @@ use std::path::{Path, PathBuf};
 
 use super::lexer::{Line, Token, tokenize};
 use crate::model::{
-    Action, BasicMod, Config, EdgeSpec, Key, Keymap, KeymapId, LockMod, LockSpec, ModSpec,
-    ScanPrefix, WindowMatch, WindowOp,
+    Action, BasicMod, Config, EdgeSpec, Func, Gravity, Key, Keymap, KeymapId, LockMod, LockSpec,
+    ModSpec, ScanPrefix, Target, WindowMatch, WindowOp,
 };
 
 /// 最大の include 深さ。循環 include もこれで止まる。
@@ -192,6 +193,101 @@ fn lock_mod_by_prefix(s: &str) -> Option<LockMod> {
         "IL-" => Some(LockMod::ImeLock),
         "IC-" | "I-" => Some(LockMod::ImeComp),
         _ => None,
+    }
+}
+
+/// `&関数( … )` の引数の読み出し。省略した引数は既定値。
+struct Args<'a> {
+    fname: &'a str,
+    args: &'a [Token],
+    loader: &'a Loader,
+}
+
+impl Args<'_> {
+    fn int(&self, i: usize) -> Result<i32> {
+        match self.args.get(i) {
+            Some(Token::Number(v, _)) => match i32::try_from(*v) {
+                Ok(v) => Ok(v),
+                Err(_) => self
+                    .loader
+                    .err(format!("`&{}`: 数が大きすぎる", self.fname)),
+            },
+            Some(t) => self.loader.err(format!(
+                "`&{}`: {} 番目の引数は数: `{t}`",
+                self.fname,
+                i + 1
+            )),
+            None => self.loader.err(format!(
+                "`&{}`: {} 番目の引数（数）が無い",
+                self.fname,
+                i + 1
+            )),
+        }
+    }
+
+    /// 省略時は `Overlapped`。
+    fn target(&self, i: usize) -> Result<Target> {
+        match self.args.get(i) {
+            None => Ok(Target::Overlapped),
+            Some(t) => {
+                let name = self.loader.name_of(t)?;
+                match lower(&name).as_str() {
+                    "overlapped" => Ok(Target::Overlapped),
+                    "mdi" => Ok(Target::Mdi),
+                    _ => self.loader.err(format!(
+                        "`&{}`: 対象は overlapped か mdi: `{name}`",
+                        self.fname
+                    )),
+                }
+            }
+        }
+    }
+
+    fn gravity(&self, i: usize) -> Result<Gravity> {
+        let Some(t) = self.args.get(i) else {
+            return self.loader.err(format!(
+                "`&{}`: {} 番目の引数（向き）が無い",
+                self.fname,
+                i + 1
+            ));
+        };
+        let name = self.loader.name_of(t)?;
+        Ok(match lower(&name).as_str() {
+            "c" => Gravity::Center,
+            "n" => Gravity::North,
+            "e" => Gravity::East,
+            "w" => Gravity::West,
+            "s" => Gravity::South,
+            "nw" => Gravity::NorthWest,
+            "ne" => Gravity::NorthEast,
+            "sw" => Gravity::SouthWest,
+            "se" => Gravity::SouthEast,
+            _ => {
+                return self.loader.err(format!(
+                    "`&{}`: 向きは C N E W S NW NE SW SE のどれか: `{name}`",
+                    self.fname
+                ));
+            }
+        })
+    }
+
+    /// `&WindowClingTo…([対象])` は `&WindowMoveTo(向き, 0, 0 [, 対象])`。
+    fn cling(&self, gravity: Gravity) -> Result<Func> {
+        Ok(Func::WindowMoveTo {
+            gravity,
+            dx: 0,
+            dy: 0,
+            target: self.target(0)?,
+        })
+    }
+
+    fn no_more(&self, max: usize) -> Result<()> {
+        if self.args.len() > max {
+            return self
+                .loader
+                .err(format!("`&{}`: 引数が多い（最大 {max} 個）", self.fname));
+        }
+        Ok(())
     }
 }
 
@@ -825,6 +921,10 @@ impl Loader {
                         out.push(Action::OtherWindowClass);
                         continue;
                     }
+                    if let Some(f) = self.load_func(&fname, cur)? {
+                        out.push(Action::Func(f));
+                        continue;
+                    }
                     if !fname.eq_ignore_ascii_case("Prefix") {
                         return self.err(format!("`&{fname}` は未対応"));
                     }
@@ -853,6 +953,107 @@ impl Loader {
             return self.err("`)` が無い");
         }
         Ok(out)
+    }
+
+    /// OS 側で実行する `&関数` とその引数。知らない名前なら `None`。
+    /// 引数の `( … )` は省略でき、省略した引数は yamy と同じ既定値になる。
+    fn load_func(&self, fname: &str, cur: &mut Cur) -> Result<Option<Func>> {
+        let lname = lower(fname);
+        // 引数の最大数。知らない名前は None（引数を読まずに返す）
+        let max = match lname.as_str() {
+            "windowmove" | "windowresizeto" => 3,
+            "windowmoveto" => 4,
+            "mousemove" => 2,
+            "windowtoggletopmost" | "windowredraw" => 0,
+            "windowraise"
+            | "windowlower"
+            | "windowminimize"
+            | "windowmaximize"
+            | "windowhmaximize"
+            | "windowvmaximize"
+            | "windowmovevisibly"
+            | "windowclose"
+            | "windowclingtoleft"
+            | "windowclingtoright"
+            | "windowclingtotop"
+            | "windowclingtobottom"
+            | "windowsetalpha" => 1,
+            _ => return Ok(None),
+        };
+        let args = self.load_args(cur)?;
+        let a = Args {
+            fname,
+            args: &args,
+            loader: self,
+        };
+        a.no_more(max)?;
+        let f = match lname.as_str() {
+            "windowraise" => Func::WindowRaise(a.target(0)?),
+            "windowlower" => Func::WindowLower(a.target(0)?),
+            "windowminimize" => Func::WindowMinimize(a.target(0)?),
+            "windowmaximize" => Func::WindowMaximize(a.target(0)?),
+            "windowhmaximize" => Func::WindowHMaximize(a.target(0)?),
+            "windowvmaximize" => Func::WindowVMaximize(a.target(0)?),
+            "windowmovevisibly" => Func::WindowMoveVisibly(a.target(0)?),
+            "windowclose" => Func::WindowClose(a.target(0)?),
+            "windowmove" => Func::WindowMove {
+                dx: a.int(0)?,
+                dy: a.int(1)?,
+                target: a.target(2)?,
+            },
+            "windowmoveto" => Func::WindowMoveTo {
+                gravity: a.gravity(0)?,
+                dx: a.int(1)?,
+                dy: a.int(2)?,
+                target: a.target(3)?,
+            },
+            "windowclingtoleft" => a.cling(Gravity::West)?,
+            "windowclingtoright" => a.cling(Gravity::East)?,
+            "windowclingtotop" => a.cling(Gravity::North)?,
+            "windowclingtobottom" => a.cling(Gravity::South)?,
+            "windowtoggletopmost" => Func::WindowToggleTopMost,
+            "windowsetalpha" => Func::WindowSetAlpha(a.int(0)?),
+            "windowredraw" => Func::WindowRedraw,
+            "windowresizeto" => Func::WindowResizeTo {
+                width: a.int(0)?,
+                height: a.int(1)?,
+                target: a.target(2)?,
+            },
+            "mousemove" => Func::MouseMove {
+                dx: a.int(0)?,
+                dy: a.int(1)?,
+            },
+            _ => unreachable!("上の max の表と同じ名前の集合"),
+        };
+        Ok(Some(f))
+    }
+
+    /// `( 引数 , 引数 … )` を読む。`(` が無ければ空。
+    fn load_args(&self, cur: &mut Cur) -> Result<Vec<Token>> {
+        let mut args = Vec::new();
+        if !cur.peek_sym("(") {
+            return Ok(args);
+        }
+        cur.next();
+        if cur.peek_sym(")") {
+            cur.next();
+            return Ok(args);
+        }
+        loop {
+            match cur.next() {
+                Some(Token::Sym(")")) | Some(Token::Sym(",")) => {
+                    return self.err("引数が空");
+                }
+                Some(t) => args.push(t.clone()),
+                None => return self.err("`)` が無い"),
+            }
+            match cur.next() {
+                Some(Token::Sym(")")) => return Ok(args),
+                Some(Token::Sym(",")) => continue,
+                Some(t) => return self.err(format!("`,` か `)` が要る所に `{t}`")),
+                None => return self.err("`)` が無い"),
+            }
+        }
     }
 
     /// 修飾の接頭辞列を読む。キー名の手前で止まる。yamy の `load_MODIFIER`。
@@ -1439,6 +1640,106 @@ keymap Sub : Global"
     }
 
     #[test]
+    fn window_functions_and_arguments() {
+        use crate::model::Target;
+        let c = load_ok(
+            "key A = &WindowMove(-16, 0)
+             key B = &WindowMove(1, 2, MDI)
+             key H = &WindowLower &WindowRaise(mdi) &WindowMaximize()
+             key Space = &WindowClingToLeft &WindowClingToBottom(MDI)
+             key BackSpace = &WindowSetAlpha(70) &WindowToggleTopMost &WindowRedraw
+             key LShift = &MouseMove(0, -1) &WindowResizeTo(0, -100)
+             key RShift = &WindowMoveTo(NE, 3, 4)",
+        );
+        let g = global(&c);
+        let o = Target::Overlapped;
+        assert_eq!(
+            only(g, A).actions,
+            vec![Action::Func(Func::WindowMove {
+                dx: -16,
+                dy: 0,
+                target: o
+            })]
+        );
+        assert_eq!(
+            only(g, B).actions,
+            vec![Action::Func(Func::WindowMove {
+                dx: 1,
+                dy: 2,
+                target: Target::Mdi
+            })]
+        );
+        assert_eq!(
+            only(g, H).actions,
+            vec![
+                Action::Func(Func::WindowLower(o)),
+                Action::Func(Func::WindowRaise(Target::Mdi)),
+                Action::Func(Func::WindowMaximize(o)),
+            ]
+        );
+        assert_eq!(
+            only(g, SPACE).actions,
+            vec![
+                Action::Func(Func::WindowMoveTo {
+                    gravity: Gravity::West,
+                    dx: 0,
+                    dy: 0,
+                    target: o
+                }),
+                Action::Func(Func::WindowMoveTo {
+                    gravity: Gravity::South,
+                    dx: 0,
+                    dy: 0,
+                    target: Target::Mdi
+                }),
+            ]
+        );
+        assert_eq!(
+            only(g, BS).actions,
+            vec![
+                Action::Func(Func::WindowSetAlpha(70)),
+                Action::Func(Func::WindowToggleTopMost),
+                Action::Func(Func::WindowRedraw),
+            ]
+        );
+        assert_eq!(
+            only(g, LSHIFT).actions,
+            vec![
+                Action::Func(Func::MouseMove { dx: 0, dy: -1 }),
+                Action::Func(Func::WindowResizeTo {
+                    width: 0,
+                    height: -100,
+                    target: o
+                }),
+            ]
+        );
+        assert_eq!(
+            only(g, RSHIFT).actions,
+            vec![Action::Func(Func::WindowMoveTo {
+                gravity: Gravity::NorthEast,
+                dx: 3,
+                dy: 4,
+                target: o
+            })]
+        );
+        assert!(load_err("key A = &WindowMove").message.contains("引数"));
+        assert!(load_err("key A = &WindowMove(1)").message.contains("引数"));
+        assert!(
+            load_err("key A = &WindowMove(1, 2, MDI, 4)")
+                .message
+                .contains("引数が多い")
+        );
+        assert!(load_err("key A = &WindowMove(a, 2)").message.contains("数"));
+        assert!(
+            load_err("key A = &WindowLower(Foo)")
+                .message
+                .contains("overlapped")
+        );
+        assert!(load_err("key A = &MouseMove(1, 2").message.contains("`)`"));
+        assert!(load_err("key A = &MouseMove(1,, 2)").message.contains("空"));
+    }
+
+    #[test]
     fn later_assignment_wins() {
         let c = load_ok("key A = B\nkey A = H");
         let g = global(&c);
@@ -1490,7 +1791,7 @@ keymap Sub : Global"
         assert_eq!(e.line, KEYS.lines().count() + 1);
         assert!(load_err("key Z = A").message.contains("未定義"));
         assert!(
-            load_err("key A = &WindowMove(1, 0)")
+            load_err("key A = &WindowMonitor(1)")
                 .message
                 .contains("未対応")
         );
