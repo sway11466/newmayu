@@ -10,6 +10,8 @@
 //!
 //! 構成は yamy と同じ。コールバックはイベントをキューに積んで `1` を返し（抑制）、
 //! 別スレッドのエンジンが処理して `SendInput` する。
+//! フック DLL（`newmayu_hook.dll`、同じフォルダ）が各プロセスから送る IME の状態も
+//! 同じキューに積み、エンジンに渡す。
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -26,14 +28,23 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use newmayu::config::parser;
 use newmayu::engine::{Engine, Input};
+use newmayu::notify::{HookDll, Mailslot};
 use newmayu::platform;
+use newmayu_ipc::Notify;
 
 const AUTO_EXIT_SECS: u64 = 60;
 const ESC_SCAN: u32 = 0x01;
 
+/// エンジンスレッドに届くもの。
+enum Event {
+    Key(Input),
+    /// フック DLL からの通知。
+    Notify(Notify),
+}
+
 /// フックのコールバックからエンジンスレッドへ渡すキュー。
 /// コールバックは C の関数でユーザーポインタを受け取れないため static に置く。
-static TX: OnceLock<Sender<Input>> = OnceLock::new();
+static TX: OnceLock<Sender<Event>> = OnceLock::new();
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
@@ -48,7 +59,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
         if let Some(input) = platform::input_from_hook(k) {
             if let Some(tx) = TX.get() {
-                let _ = tx.send(input);
+                let _ = tx.send(Event::Key(input));
             }
             return LRESULT(1);
         }
@@ -79,8 +90,24 @@ fn main() -> ExitCode {
             .sum::<usize>()
     );
 
-    let (tx, rx) = channel::<Input>();
-    TX.set(tx).expect("TX は一度だけ設定する");
+    let (tx, rx) = channel::<Event>();
+    TX.set(tx.clone()).expect("TX は一度だけ設定する");
+
+    // フック DLL からの通知を受けるメールスロット。DLL を入れる前に作る
+    let mailslot = match Mailslot::create() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    thread::spawn(move || {
+        while let Some(n) = mailslot.read() {
+            if tx.send(Event::Notify(n)).is_err() {
+                break;
+            }
+        }
+    });
 
     // 保険: 自動終了
     thread::spawn(|| {
@@ -92,12 +119,36 @@ fn main() -> ExitCode {
     // エンジンスレッド
     thread::spawn(move || {
         let mut engine = Engine::new(config);
-        for input in rx {
-            let outputs = engine.feed(input);
-            eprintln!("{input:?} -> {outputs:?}");
-            platform::send(&outputs);
+        for ev in rx {
+            match ev {
+                Event::Key(input) => {
+                    let outputs = engine.feed(input);
+                    eprintln!("{input:?} -> {outputs:?}");
+                    platform::send(&outputs);
+                }
+                Event::Notify(n) => {
+                    eprintln!(
+                        "IME: on={} 変換中={} (thread={} hwnd={:#x} cause={})",
+                        n.ime_open(),
+                        n.ime_composing(),
+                        n.thread_id,
+                        n.hwnd,
+                        n.cause
+                    );
+                    engine.set_ime(n.ime_open(), n.ime_composing());
+                }
+            }
         }
     });
+
+    // フック DLL を各プロセスに入れる
+    let hook_dll = match HookDll::install() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     // フック設置スレッド（= このスレッド）。メッセージループが要る。
     // SAFETY: hook_proc は WH_KEYBOARD_LL の規約どおりの関数。
@@ -111,5 +162,6 @@ fn main() -> ExitCode {
 
     // SAFETY: SetWindowsHookExW が返した有効なハンドル。
     let _ = unsafe { UnhookWindowsHookEx(hook) };
+    drop(hook_dll);
     ExitCode::SUCCESS
 }

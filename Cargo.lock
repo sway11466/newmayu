@@ -6,8 +6,21 @@ version = 4
 name = "newmayu"
 version = "0.1.0"
 dependencies = [
+ "newmayu-ipc",
  "windows",
 ]
+
+[[package]]
+name = "newmayu-hook"
+version = "0.1.0"
+dependencies = [
+ "newmayu-ipc",
+ "windows",
+]
+
+[[package]]
+name = "newmayu-ipc"
+version = "0.1.0"
 
 [[package]]
 name = "proc-macro2"
