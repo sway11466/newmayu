@@ -17,7 +17,8 @@
 //! key MODKEY... = ACTION...                    # ACTION = 修飾付きキー名 | $keyseq名 | ( ACTION... ) | &Prefix(KEYMAP)
 //!                                              #        | &Default | &KeymapParent | &OtherWindowClass
 //!                                              #        | &Window…([引数]) | &MouseMove(dx, dy)   （model::Func 参照）
-//!                                              #        | &Ignore | &Undefined
+//!                                              #        | &Ignore | &Undefined | &VK([E-][D-|U-]名前|番号)
+//!                                              #        | &PostMessage(宛先, msg, wParam, lParam)
 //!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）
 //!                                              # NL- CL- SL- KL-（NumLock CapsLock ScrollLock カナ）も書ける
 //! mod MODNAME (=|+=|-=) KEY...
@@ -39,9 +40,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use super::lexer::{Line, Token, tokenize};
+use super::vkeys::vk_by_name;
 use crate::model::{
     Action, BasicMod, Config, EdgeSpec, Func, Gravity, Key, Keymap, KeymapId, LockMod, LockSpec,
-    ModSpec, ScanPrefix, Target, WindowMatch, WindowOp,
+    ModSpec, ScanPrefix, Target, ToWindow, WindowMatch, WindowOp,
 };
 
 /// 最大の include 深さ。循環 include もこれで止まる。
@@ -229,6 +231,45 @@ impl Args<'_> {
                 i + 1
             )),
         }
+    }
+
+    fn i64(&self, i: usize) -> Result<i64> {
+        match self.args.get(i) {
+            Some(Token::Number(v, _)) => Ok(*v),
+            Some(t) => self.loader.err(format!(
+                "`&{}`: {} 番目の引数は数: `{t}`",
+                self.fname,
+                i + 1
+            )),
+            None => self.loader.err(format!(
+                "`&{}`: {} 番目の引数（数）が無い",
+                self.fname,
+                i + 1
+            )),
+        }
+    }
+
+    fn to_window(&self, i: usize) -> Result<ToWindow> {
+        let Some(t) = self.args.get(i) else {
+            return self.loader.err(format!(
+                "`&{}`: {} 番目の引数（宛先）が無い",
+                self.fname,
+                i + 1
+            ));
+        };
+        let name = self.loader.name_of(t)?;
+        Ok(match lower(&name).as_str() {
+            "toitself" => ToWindow::Itself,
+            "toparentwindow" => ToWindow::Parent,
+            "tomainwindow" => ToWindow::Main,
+            "tooverlappedwindow" => ToWindow::Overlapped,
+            _ => {
+                return self.loader.err(format!(
+                    "`&{}`: 宛先は ToItself / ToParentWindow / ToMainWindow / ToOverlappedWindow: `{name}`",
+                    self.fname
+                ));
+            }
+        })
     }
 
     /// 省略時は `Overlapped`。
@@ -931,6 +972,10 @@ impl Loader {
                         out.push(Action::Ignore);
                         continue;
                     }
+                    if fname.eq_ignore_ascii_case("VK") {
+                        out.push(self.load_vk(cur)?);
+                        continue;
+                    }
                     if let Some(f) = self.load_func(&fname, cur)? {
                         out.push(Action::Func(f));
                         continue;
@@ -975,6 +1020,7 @@ impl Loader {
             "windowmoveto" => 4,
             "mousemove" => 2,
             "windowtoggletopmost" | "windowredraw" | "undefined" => 0,
+            "postmessage" => 4,
             "windowraise"
             | "windowlower"
             | "windowminimize"
@@ -1023,6 +1069,12 @@ impl Loader {
             "windowclingtobottom" => a.cling(Gravity::South)?,
             "windowtoggletopmost" => Func::WindowToggleTopMost,
             "undefined" => Func::Undefined,
+            "postmessage" => Func::PostMessage {
+                to: a.to_window(0)?,
+                message: a.int(1)? as u32,
+                wparam: a.i64(2)? as u64,
+                lparam: a.i64(3)?,
+            },
             "windowsetalpha" => Func::WindowSetAlpha(a.int(0)?),
             "windowredraw" => Func::WindowRedraw,
             "windowresizeto" => Func::WindowResizeTo {
@@ -1037,6 +1089,55 @@ impl Loader {
             _ => unreachable!("上の max の表と同じ名前の集合"),
         };
         Ok(Some(f))
+    }
+
+    /// `&VK( [E-] [D-|U-] 名前|番号 )`。yamy の `load_ARGUMENT(VKey*)`。
+    fn load_vk(&self, cur: &mut Cur) -> Result<Action> {
+        self.expect_sym(cur, "(")?;
+        let mut extended = false;
+        let mut down = false;
+        let mut up = false;
+        let vk = loop {
+            match cur.next() {
+                Some(Token::Sym("E-")) => extended = true,
+                Some(Token::Sym("D-")) => down = true,
+                Some(Token::Sym("U-")) => up = true,
+                Some(Token::Number(v, s)) => match u8::try_from(*v) {
+                    Ok(v) => break v,
+                    Err(_) => return self.err(format!("`&VK`: 仮想キーコードは 0〜255: `{s}`")),
+                },
+                Some(t) => {
+                    // `E-D-Return` のように名前に続く接頭辞は 1 つの名前として届くので、ここで剥がす
+                    let mut name = self.name_of(t)?.as_str().to_string();
+                    loop {
+                        let head = name.get(..2).map(|h| h.to_ascii_uppercase());
+                        match head.as_deref() {
+                            Some("E-") => extended = true,
+                            Some("D-") => down = true,
+                            Some("U-") => up = true,
+                            _ => break,
+                        }
+                        name = name[2..].to_string();
+                    }
+                    match vk_by_name(&name) {
+                        Some(v) => break v,
+                        None => return self.err(format!("`&VK`: 知らない仮想キー名 `{name}`")),
+                    }
+                }
+                None => return self.err("`&VK(` の後は仮想キー名"),
+            }
+        };
+        self.expect_sym(cur, ")")?;
+        if !down && !up {
+            down = true;
+            up = true;
+        }
+        Ok(Action::Vk {
+            vk,
+            extended,
+            down,
+            up,
+        })
     }
 
     /// `( 引数 , 引数 … )` を読む。`(` が無ければ空。
@@ -1769,6 +1870,78 @@ keymap Sub : Global"
         );
         assert!(load_err("key A = &MouseMove(1, 2").message.contains("`)`"));
         assert!(load_err("key A = &MouseMove(1,, 2)").message.contains("空"));
+    }
+
+    #[test]
+    fn vk_and_post_message() {
+        let c = load_ok(
+            "key A = &VK(RButton)
+             key B = &VK(E-D-Return) &VK(U-0x41)
+             key H = &PostMessage(ToItself, 277, 2, 0)
+             key Space = &PostMessage(toMainWindow, 273, 41525, -1)",
+        );
+        let g = global(&c);
+        assert_eq!(
+            only(g, A).actions,
+            vec![Action::Vk {
+                vk: 0x02,
+                extended: false,
+                down: true,
+                up: true
+            }]
+        );
+        assert_eq!(
+            only(g, B).actions,
+            vec![
+                Action::Vk {
+                    vk: 0x0d,
+                    extended: true,
+                    down: true,
+                    up: false
+                },
+                Action::Vk {
+                    vk: 0x41,
+                    extended: false,
+                    down: false,
+                    up: true
+                },
+            ]
+        );
+        assert_eq!(
+            only(g, H).actions,
+            vec![Action::Func(Func::PostMessage {
+                to: ToWindow::Itself,
+                message: 277,
+                wparam: 2,
+                lparam: 0
+            })]
+        );
+        assert_eq!(
+            only(g, SPACE).actions,
+            vec![Action::Func(Func::PostMessage {
+                to: ToWindow::Main,
+                message: 273,
+                wparam: 41525,
+                lparam: -1
+            })]
+        );
+        assert!(
+            load_err("key A = &VK(Nothing)")
+                .message
+                .contains("仮想キー名")
+        );
+        assert!(load_err("key A = &VK(300)").message.contains("0〜255"));
+        assert!(load_err("key A = &VK").message.contains("`(`"));
+        assert!(
+            load_err("key A = &PostMessage(ToItself, 1, 2)")
+                .message
+                .contains("無い")
+        );
+        assert!(
+            load_err("key A = &PostMessage(Nowhere, 1, 2, 3)")
+                .message
+                .contains("宛先")
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::engine::Output;
-use crate::model::{Func, Gravity, Target};
+use crate::model::{Func, Gravity, Target, ToWindow};
 
 /// `&WindowVMaximize` / `&WindowHMaximize` で覚えた元の位置（yamy の `WindowPosition`）。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -179,6 +179,38 @@ impl WindowOps {
                             | SWP_NOZORDER,
                     )
                 };
+            }
+            Func::PostMessage {
+                to,
+                message,
+                wparam,
+                lparam,
+            } => {
+                let mut hwnd = focus;
+                match to {
+                    ToWindow::Itself => {}
+                    // SAFETY: 有効な窓ハンドル（親が無ければ NULL）。
+                    ToWindow::Parent => hwnd = unsafe { GetParent(hwnd) }.unwrap_or_default(),
+                    ToWindow::Main => loop {
+                        // SAFETY: 同上。
+                        match unsafe { GetParent(hwnd) } {
+                            Ok(p) if !p.0.is_null() => hwnd = p,
+                            _ => break,
+                        }
+                    },
+                    ToWindow::Overlapped => hwnd = toplevel(hwnd, false).0.unwrap_or_default(),
+                }
+                if !hwnd.0.is_null() {
+                    // SAFETY: 有効な窓ハンドル。値は設定ファイルの指定どおり。
+                    let _ = unsafe {
+                        PostMessageW(
+                            Some(hwnd),
+                            message,
+                            WPARAM(wparam as usize),
+                            LPARAM(lparam as isize),
+                        )
+                    };
+                }
             }
             Func::Undefined => {
                 // SAFETY: 単純な API。

@@ -430,6 +430,28 @@ pub enum Action {
     Func(Func),
     /// `&Ignore`: 何もしない（キーを出さない）。
     Ignore,
+    /// `&VK([E-][D-|U-]名前|番号)`: 仮想キーコードで出す（スキャンコードではなく）。
+    /// `down` なら押したときに押しを、`up` なら離したときに離しを出す。どちらも無指定なら両方。
+    /// マウスボタン（LButton 等）はマウス入力として出す。
+    Vk {
+        vk: u8,
+        extended: bool,
+        down: bool,
+        up: bool,
+    },
+}
+
+/// `&PostMessage` の宛先（yamy の `ToWindowType`）。フォーカス窓から見た相対。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToWindow {
+    /// `ToItself`: フォーカス窓そのもの。
+    Itself,
+    /// `ToParentWindow`: その親。
+    Parent,
+    /// `ToMainWindow`: 親をたどった根。
+    Main,
+    /// `ToOverlappedWindow`: 子窓でなくなるまでたどった窓。
+    Overlapped,
 }
 
 /// 窓の関数の対象（yamy の `TargetWindowType`）。
@@ -528,6 +550,13 @@ pub enum Func {
     MouseMove { dx: i32, dy: i32 },
     /// `&Undefined`: ビープ音を鳴らす（割付の無いキーだと知らせる）。
     Undefined,
+    /// `&PostMessage(宛先, メッセージ, wParam, lParam)`: 窓にメッセージを送る（PostMessage）。
+    PostMessage {
+        to: ToWindow,
+        message: u32,
+        wparam: u64,
+        lparam: i64,
+    },
 }
 
 impl Action {

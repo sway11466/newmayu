@@ -49,6 +49,12 @@ pub enum Output {
         hwnd: u64,
         func: Func,
     },
+    /// `&VK`: 仮想キーコードで押す／離す。
+    Vk {
+        vk: u8,
+        extended: bool,
+        up: bool,
+    },
 }
 
 /// キーマップ木の探索が戻らないときの上限（yamy と同じ 64）。
@@ -338,6 +344,24 @@ impl Engine {
                 None => self.generate_default(key, event_mods, edge),
             },
             Action::Ignore => {}
+            Action::Vk {
+                vk,
+                extended,
+                down,
+                up,
+            } => {
+                let emit = match edge {
+                    Edge::Down => *down,
+                    Edge::Up => *up,
+                };
+                if emit {
+                    self.out.push(Output::Vk {
+                        vk: *vk,
+                        extended: *extended,
+                        up: edge == Edge::Up,
+                    });
+                }
+            }
             Action::Func(f) => {
                 if edge == Edge::Down {
                     self.out.push(Output::Func {
@@ -801,6 +825,63 @@ mod tests {
         e.feed(Input::up(B));
         e.set_lock(LockMod::NumLock, true);
         assert_eq!(e.feed(Input::down(B)), vec![Output::Press(X)]);
+    }
+
+    #[test]
+    fn vk_follows_its_down_up_flags() {
+        let (config, mut global) = base();
+        let any = LockSpec::any();
+        // key A = &VK(RButton) / key B = &VK(D-E-Return)
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            any,
+            vec![Action::Vk {
+                vk: 0x02,
+                extended: false,
+                down: true,
+                up: true,
+            }],
+        );
+        global.assign(
+            B,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            any,
+            vec![Action::Vk {
+                vk: 0x0d,
+                extended: true,
+                down: true,
+                up: false,
+            }],
+        );
+        let mut e = engine(config, vec![global]);
+        assert_eq!(
+            e.feed(Input::down(A)),
+            vec![Output::Vk {
+                vk: 0x02,
+                extended: false,
+                up: false
+            }]
+        );
+        assert_eq!(
+            e.feed(Input::up(A)),
+            vec![Output::Vk {
+                vk: 0x02,
+                extended: false,
+                up: true
+            }]
+        );
+        assert_eq!(
+            e.feed(Input::down(B)),
+            vec![Output::Vk {
+                vk: 0x0d,
+                extended: true,
+                up: false
+            }]
+        );
+        assert_eq!(e.feed(Input::up(B)), vec![]);
     }
 
     #[test]

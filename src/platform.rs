@@ -4,8 +4,12 @@
 //! - [`Output`] を `SendInput` に流す
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, SendInput, VIRTUAL_KEY,
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
+    MapVirtualKeyW, SendInput, VIRTUAL_KEY, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1,
+    VK_XBUTTON2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP,
@@ -64,6 +68,56 @@ fn keybd_input(key: Key, up: bool) -> Option<INPUT> {
     })
 }
 
+/// `&VK` の出力。マウスボタンはマウス入力、それ以外は仮想キーコードのキー入力
+/// （スキャンコードは `MapVirtualKey` で補う。yamy の `funcVK` と同じ）。
+fn vk_input(vk: u8, extended: bool, up: bool) -> INPUT {
+    let button = [
+        (VK_LBUTTON, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0),
+        (VK_RBUTTON, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
+        (VK_MBUTTON, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
+        (VK_XBUTTON1, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, 1),
+        (VK_XBUTTON2, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, 2),
+    ]
+    .into_iter()
+    .find(|(v, _, _, _)| v.0 == vk as u16);
+    if let Some((_, down_flag, up_flag, xbutton)) = button {
+        return INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: xbutton,
+                    dwFlags: if up { up_flag } else { down_flag },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+    }
+    let mut flags = KEYBD_EVENT_FLAGS(0);
+    if extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    if up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    // SAFETY: 単純な変換 API。
+    let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk as u16),
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
 /// エンジンの出力をまとめて OS に注入する。
 pub fn send(outputs: &[Output]) {
     let inputs: Vec<INPUT> = outputs
@@ -71,6 +125,7 @@ pub fn send(outputs: &[Output]) {
         .filter_map(|o| match o {
             Output::Press(k) => keybd_input(*k, false),
             Output::Release(k) => keybd_input(*k, true),
+            Output::Vk { vk, extended, up } => Some(vk_input(*vk, *extended, *up)),
             Output::Func { .. } => None,
         })
         .collect();
