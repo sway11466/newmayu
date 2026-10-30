@@ -5,6 +5,7 @@
 //! ```text
 //! include "file"
 //! define SYMBOL
+//! if ( [!] SYMBOL ) [文] / and ( [!] SYMBOL ) / else [文] / elseif ( [!] SYMBOL ) / endif
 //! def key NAME... = [E0-|E1-]SCANCODE          # NAME を ( ) で囲む形も可。スキャンコードは 1 個
 //! def mod (shift|alt|control|windows) = KEY...
 //! def alias NAME = KEY
@@ -19,13 +20,13 @@
 //! dontcare、`~` は離し。未指定の基本修飾（S- A- C- W-）は離し、M0-〜M9- は dontcare。
 //! `U-` `D-` は押し・離しの区別（両方または無指定なら両方）。
 //!
-//! これ以外（`if`/`else`/`endif`、`window`、`keymap2`、`event`、`def option`、`def subst`、
+//! これ以外（`window`、`keymap2`、`event`、`def option`、`def subst`、
 //! `&Prefix` 以外の `&関数`、`!`/`!!`/`!!!`、IL- IC- NL- 等の割当修飾、2 個以上のスキャンコード）は
 //! エラーにする。
 //!
 //! ファイルは BOM 無し UTF-8 のみ。大文字小文字は区別しない。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -91,6 +92,10 @@ struct Loader {
     aliases: HashMap<String, usize>,
     /// `def mod`。
     def_mods: [Vec<Key>; BasicMod::ALL.len()],
+    /// `define` したシンボル（小文字化）。`if` の条件に使う。
+    symbols: HashSet<String>,
+    /// `if` の入れ子ごとの「いま読むか」。yamy の `m_canReadStack`。
+    can_read: Vec<bool>,
     /// `keyseq $名`（小文字化）→ 展開済みの動作列。
     keyseqs: HashMap<String, Vec<Action>>,
     keymaps: Vec<KeymapBuild>,
@@ -202,6 +207,8 @@ impl Loader {
             names: HashMap::new(),
             aliases: HashMap::new(),
             def_mods: Default::default(),
+            symbols: HashSet::new(),
+            can_read: Vec::new(),
             keyseqs: HashMap::new(),
             keymaps: vec![global],
             keymap_names,
@@ -277,23 +284,132 @@ impl Loader {
             toks: &line.tokens,
             i: 0,
         };
-        let Some(Token::Name(head)) = cur.next() else {
-            return self.err(format!("文の先頭が名前でない: {}", line.tokens[0]));
+        self.load_statement(&mut cur, dir, depth)
+    }
+
+    /// 1 文。`if ( SYM ) key A = B` のように if の後ろにも文が続くので、カーソルを受ける。
+    fn load_statement(&mut self, cur: &mut Cur, dir: &Path, depth: usize) -> Result<()> {
+        let Some(t) = cur.next() else {
+            return self.err("文が空");
         };
-        match lower(head).as_str() {
-            "include" => self.load_include(&mut cur, dir, depth),
-            "define" => self.load_define(&mut cur),
-            "def" => self.load_def(&mut cur),
-            "keymap" => self.load_keymap(&mut cur),
-            "key" => self.load_key(&mut cur),
-            "mod" => self.load_mod(&mut cur),
-            "keyseq" => self.load_keyseq(&mut cur),
-            "if" | "and" | "else" | "elseif" | "elsif" | "elif" | "or" | "endif" => {
-                self.err(format!("`{head}` は未対応"))
+        let Token::Name(head) = t else {
+            return self.err(format!("文の先頭が名前でない: {t}"));
+        };
+        let head_l = lower(head);
+        // if / else / endif は読まない区間でも見る
+        match head_l.as_str() {
+            "if" | "and" => return self.load_if(cur, dir, depth),
+            "else" => return self.load_else(cur, dir, depth, false, head),
+            "elseif" | "elsif" | "elif" | "or" => {
+                return self.load_else(cur, dir, depth, true, head);
             }
+            "endif" => {
+                self.load_endif(head)?;
+                return self.expect_end(cur);
+            }
+            _ => {}
+        }
+        if self.can_read.last() == Some(&false) {
+            return Ok(());
+        }
+        match head_l.as_str() {
+            "include" => self.load_include(cur, dir, depth),
+            "define" => self.load_define(cur),
+            "def" => self.load_def(cur),
+            "keymap" => self.load_keymap(cur),
+            "key" => self.load_key(cur),
+            "mod" => self.load_mod(cur),
+            "keyseq" => self.load_keyseq(cur),
             "window" | "keymap2" | "event" => self.err(format!("`{head}` は未対応")),
             _ => self.err(format!("知らない文 `{head}`")),
         }
+    }
+
+    // ---- if / else / endif ----------------------------------------------
+    //
+    // yamy と同じ仕組み。`if ( SYM )` は「いま読むか」を積み、`endif` で降ろす。
+    // 同じ行に続く文（`if ( SYM ) key A = B`、`if ( A ) and ( B )`）は、その場で処理してから
+    // 積んだ分を調整する: 続く文がさらに積んだら（`and`）それと合成して 1 段にまとめ、
+    // 積まなかったら（`key`）1 行だけの if なので降ろす。
+
+    /// `if ( [!] SYMBOL ) [文]`
+    fn load_if(&mut self, cur: &mut Cur, dir: &Path, depth: usize) -> Result<()> {
+        self.expect_sym(cur, "(")?;
+        let mut not = false;
+        if cur.peek_sym("!") {
+            cur.next();
+            not = true;
+        }
+        let Some(t) = cur.next() else {
+            return self.err("if ( の後はシンボル名");
+        };
+        let sym = self.name_of(t)?;
+        self.expect_sym(cur, ")")?;
+        let exists = self.symbols.contains(&lower(&sym));
+        let does_read = (exists != not) && self.can_read.last().copied().unwrap_or(true);
+        self.can_read.push(does_read);
+        self.load_rest_of_if_line(cur, dir, depth, does_read)
+    }
+
+    /// `else [文]` / `elseif ( SYMBOL ) [文]`
+    fn load_else(
+        &mut self,
+        cur: &mut Cur,
+        dir: &Path,
+        depth: usize,
+        is_else_if: bool,
+        word: &str,
+    ) -> Result<()> {
+        let was_read = self.load_endif(word)?;
+        let does_read = !was_read && self.can_read.last().copied().unwrap_or(true);
+        self.can_read.push(does_read);
+        if is_else_if {
+            // `elseif ( SYM )` は else の段の上に if を重ね、1 段にまとめる
+            if cur.at_end() {
+                return self.err(format!("`{word}` の後は ( シンボル )"));
+            }
+            let len = self.can_read.len();
+            self.load_if(cur, dir, depth)?;
+            return self.merge_if_level(len, does_read);
+        }
+        self.load_rest_of_if_line(cur, dir, depth, does_read)
+    }
+
+    /// `endif`。降ろした段の値を返す。
+    fn load_endif(&mut self, word: &str) -> Result<bool> {
+        match self.can_read.pop() {
+            Some(r) => Ok(r),
+            None => self.err(format!("対応する if の無い `{word}`")),
+        }
+    }
+
+    fn load_rest_of_if_line(
+        &mut self,
+        cur: &mut Cur,
+        dir: &Path,
+        depth: usize,
+        does_read: bool,
+    ) -> Result<()> {
+        if cur.at_end() {
+            return Ok(());
+        }
+        let len = self.can_read.len();
+        self.load_statement(cur, dir, depth)?;
+        self.merge_if_level(len, does_read)
+    }
+
+    /// 同じ行の続きの文を処理した後の段の調整。`len` は続きを読む前の段数。
+    fn merge_if_level(&mut self, len: usize, does_read: bool) -> Result<()> {
+        if self.can_read.len() > len {
+            // 続きが `and ( SYM )` などで積んだ: 自分の段に合成する
+            let r = self.can_read.pop().unwrap_or(true);
+            self.can_read[len - 1] = r && does_read;
+        } else if self.can_read.len() == len {
+            // 続きが普通の文: 1 行だけの if なので降ろす
+            self.can_read.pop();
+        }
+        // 続きが `endif` で自分の段を降ろした場合は何もしない
+        Ok(())
     }
 
     // ---- 文ごとの読み込み ------------------------------------------------
@@ -315,12 +431,15 @@ impl Loader {
         Ok(())
     }
 
-    /// `define SYMBOL`。シンボルは `if` でだけ使い、`if` はサブセット外なので読むだけ。
+    /// `define SYMBOL`
     fn load_define(&mut self, cur: &mut Cur) -> Result<()> {
-        let Some(Token::Name(_)) = cur.next() else {
+        let Some(t) = cur.next() else {
             return self.err("define の後はシンボル名");
         };
-        self.expect_end(cur)
+        let sym = self.name_of(t)?;
+        self.expect_end(cur)?;
+        self.symbols.insert(lower(&sym));
+        Ok(())
     }
 
     fn load_def(&mut self, cur: &mut Cur) -> Result<()> {
@@ -1045,6 +1164,54 @@ keymap Sub : Global"
     }
 
     #[test]
+    fn if_else_endif() {
+        let c = load_ok(
+            "define KBD109
+             if ( KBD109 )
+               key A = B
+               if ( !KBD109 )
+                 key H = B
+               else
+                 key H = A
+               endif
+             else
+               key Space = B
+             endif
+             if ( KBD104 ) key BackSpace = B
+             if ( KBD109 ) and ( ! KBD104 )
+               key LShift = B
+             endif
+             if ( KBD104 ) and ( KBD109 )
+               key RShift = B
+               define KBD104
+             elseif ( KBD109 )
+               key LControl = B
+             endif
+             if ( KBD104 )
+               key RControl = B
+             endif
+             key LAlt = B",
+        );
+        let g = c.keymap(c.root);
+        let keys: Vec<Key> = g.assignments.iter().map(|a| a.key).collect();
+        assert!(keys.contains(&A));
+        assert_eq!(only(g, H).actions[0], Action::key_with(A, base()));
+        assert!(!keys.contains(&SPACE), "else 側は読まない");
+        assert!(!keys.contains(&BS), "1 行 if は条件が偽なら読まない");
+        assert!(keys.contains(&LSHIFT), "and で両方真");
+        assert!(!keys.contains(&RSHIFT), "and で片方偽");
+        assert!(keys.contains(&LCONTROL), "elseif");
+        assert!(
+            !keys.contains(&RCONTROL),
+            "読まない区間の define は効かない"
+        );
+        assert!(keys.contains(&LALT), "endif の後は読む");
+        assert!(load_err("endif").message.contains("対応する if"));
+        assert!(load_err("else").message.contains("対応する if"));
+        assert!(load_err("if KBD109").message.contains("`(`"));
+    }
+
+    #[test]
     fn later_assignment_wins() {
         let c = load_ok("key A = B\nkey A = H");
         let g = c.keymap(c.root);
@@ -1093,7 +1260,6 @@ keymap Sub : Global"
         assert!(e.message.contains("2 個以上"), "{e}");
         assert_eq!(e.line, KEYS.lines().count() + 1);
         assert!(load_err("key Z = A").message.contains("未定義"));
-        assert!(load_err("if ( KBD109 )").message.contains("未対応"));
         assert!(load_err("key A = &Default").message.contains("未対応"));
         assert!(load_err("key IL-A = B").message.contains("未対応"));
         assert!(load_err("mod !shift = A").message.contains("未対応"));
