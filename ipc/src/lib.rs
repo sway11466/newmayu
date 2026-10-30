@@ -11,8 +11,8 @@ pub const MAILSLOT_NAME: &str = r"\\.\mailslot\newmayu\notify";
 /// 通知の種類。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// IME の状態。`flags` の bit0 = IME オン、bit1 = 変換中。本文なし。
-    Ime,
+    /// 鍵の状態（IME のオン・変換中、NumLock 等）。`flags` は `IME_OPEN` 等のビット。本文なし。
+    Lock,
     /// フォーカスが移った。本文はクラス名の列とタイトルの列（UTF-8）。
     Focus,
 }
@@ -20,13 +20,13 @@ pub enum Kind {
 impl Kind {
     const fn code(self) -> u32 {
         match self {
-            Kind::Ime => 1,
+            Kind::Lock => 1,
             Kind::Focus => 2,
         }
     }
     const fn from_code(c: u32) -> Option<Kind> {
         match c {
-            1 => Some(Kind::Ime),
+            1 => Some(Kind::Lock),
             2 => Some(Kind::Focus),
             _ => None,
         }
@@ -35,6 +35,10 @@ impl Kind {
 
 pub const IME_OPEN: u32 = 1 << 0;
 pub const IME_COMPOSING: u32 = 1 << 1;
+pub const NUM_LOCK: u32 = 1 << 2;
+pub const CAPS_LOCK: u32 = 1 << 3;
+pub const SCROLL_LOCK: u32 = 1 << 4;
+pub const KANA_LOCK: u32 = 1 << 5;
 
 /// 通知の見出し。全種類に共通。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,11 +78,14 @@ impl Header {
         })
     }
 
+    pub const fn lock(&self, flag: u32) -> bool {
+        self.flags & flag != 0
+    }
     pub const fn ime_open(&self) -> bool {
-        self.flags & IME_OPEN != 0
+        self.lock(IME_OPEN)
     }
     pub const fn ime_composing(&self) -> bool {
-        self.flags & IME_COMPOSING != 0
+        self.lock(IME_COMPOSING)
     }
 }
 
@@ -87,8 +94,8 @@ pub const MAX_NAME: usize = 1024;
 /// 1 通知の最大長。メールスロットの読み取りバッファはこれで足りる。
 pub const MAX_SIZE: usize = Header::SIZE + 4 + 2 * MAX_NAME;
 
-/// IME 通知を書く。戻り値は書いた長さ。
-pub fn write_ime(buf: &mut [u8; MAX_SIZE], h: &Header) -> usize {
+/// 鍵の状態の通知を書く。戻り値は書いた長さ。
+pub fn write_lock(buf: &mut [u8; MAX_SIZE], h: &Header) -> usize {
     h.write(buf);
     Header::SIZE
 }
@@ -124,7 +131,7 @@ impl Notify {
     pub fn from_bytes(b: &[u8]) -> Option<Notify> {
         let header = Header::read(b)?;
         let (class, title) = match header.kind {
-            Kind::Ime => {
+            Kind::Lock => {
                 if b.len() != Header::SIZE {
                     return None;
                 }
@@ -158,20 +165,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ime_roundtrip() {
+    fn lock_roundtrip() {
         let h = Header {
-            kind: Kind::Ime,
+            kind: Kind::Lock,
             cause: 3,
             thread_id: 0x1234,
             hwnd: 0x0000_0001_0002_0003,
             flags: IME_OPEN | IME_COMPOSING,
         };
         let mut buf = [0u8; MAX_SIZE];
-        let n = write_ime(&mut buf, &h);
+        let n = write_lock(&mut buf, &h);
         assert_eq!(n, Header::SIZE);
         let got = Notify::from_bytes(&buf[..n]).unwrap();
         assert_eq!(got.header, h);
         assert!(got.header.ime_open() && got.header.ime_composing());
+        assert!(!got.header.lock(NUM_LOCK));
         assert_eq!(Notify::from_bytes(&buf[..10]), None);
         let mut bad = buf;
         bad[0] = 99;

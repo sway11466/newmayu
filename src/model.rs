@@ -222,10 +222,25 @@ pub enum LockMod {
     ImeLock,
     /// `IC-` `I-`: IME で変換中（未確定文字がある）。
     ImeComp,
+    /// `NL-`: NumLock。
+    NumLock,
+    /// `CL-`: CapsLock。
+    CapsLock,
+    /// `SL-`: ScrollLock。
+    ScrollLock,
+    /// `KL-`: カナロック。
+    KanaLock,
 }
 
 impl LockMod {
-    pub const ALL: [LockMod; 2] = [LockMod::ImeLock, LockMod::ImeComp];
+    pub const ALL: [LockMod; 6] = [
+        LockMod::ImeLock,
+        LockMod::ImeComp,
+        LockMod::NumLock,
+        LockMod::CapsLock,
+        LockMod::ScrollLock,
+        LockMod::KanaLock,
+    ];
 
     pub const fn index(self) -> usize {
         self as usize
@@ -413,6 +428,8 @@ pub enum Action {
     OtherWindowClass,
     /// OS 側で実行する関数（窓の操作・マウス移動）。押したときだけ動く。
     Func(Func),
+    /// `&Ignore`: 何もしない（キーを出さない）。
+    Ignore,
 }
 
 /// 窓の関数の対象（yamy の `TargetWindowType`）。
@@ -509,6 +526,8 @@ pub enum Func {
     },
     /// `&MouseMove(dx, dy)`: マウスカーソルの相対移動。
     MouseMove { dx: i32, dy: i32 },
+    /// `&Undefined`: ビープ音を鳴らす（割付の無いキーだと知らせる）。
+    Undefined,
 }
 
 impl Action {

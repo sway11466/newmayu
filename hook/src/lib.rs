@@ -14,8 +14,8 @@
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use newmayu_ipc::{
-    Header, IME_COMPOSING, IME_OPEN, Kind, MAILSLOT_NAME, MAX_NAME, MAX_SIZE, write_focus,
-    write_ime,
+    CAPS_LOCK, Header, IME_COMPOSING, IME_OPEN, KANA_LOCK, Kind, MAILSLOT_NAME, MAX_NAME, MAX_SIZE,
+    NUM_LOCK, SCROLL_LOCK, write_focus, write_lock,
 };
 use windows::Win32::Foundation::{
     GENERIC_WRITE, HANDLE, HINSTANCE, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM,
@@ -28,7 +28,9 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::Ime::{
     IMN_SETOPENSTATUS, ImmGetContext, ImmGetOpenStatus, ImmReleaseContext,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetFocus, GetKeyState, VK_CAPITAL, VK_KANA, VK_NUMLOCK, VK_SCROLL,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CWPSTRUCT, CallNextHookEx, GetClassNameW, GetParent, GetWindowTextW, HHOOK, MSG, PM_REMOVE,
     SetWindowsHookExW, UnhookWindowsHookEx, WA_INACTIVE, WH_CALLWNDPROC, WH_GETMESSAGE,
@@ -142,7 +144,11 @@ fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, _lparam: LPARAM, cause_b
             refresh_open_status(hwnd, cause_base + 3, true);
         }
         WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {
-            refresh_open_status(hwnd, cause_base + 4, false);
+            let vk = wparam.0 as u16;
+            let is_lock_key = [VK_CAPITAL, VK_NUMLOCK, VK_SCROLL, VK_KANA]
+                .iter()
+                .any(|k| k.0 == vk);
+            refresh_open_status(hwnd, cause_base + 4, is_lock_key);
         }
         WM_SETFOCUS => {
             IN_MENU.store(false, Ordering::Relaxed);
@@ -291,6 +297,7 @@ fn refresh_open_status(hwnd: HWND, cause: u32, force: bool) {
     }
 }
 
+/// IME の状態（覚えているもの）と、ロックキーの状態（`GetKeyState` のトグルビット）を送る。
 fn notify_ime(hwnd: HWND, cause: u32) {
     let mut flags = 0;
     if IME_OPEN_STATE.load(Ordering::Relaxed) {
@@ -299,8 +306,19 @@ fn notify_ime(hwnd: HWND, cause: u32) {
     if IME_COMPOSING_STATE.load(Ordering::Relaxed) {
         flags |= IME_COMPOSING;
     }
+    for (vk, flag) in [
+        (VK_NUMLOCK, NUM_LOCK),
+        (VK_CAPITAL, CAPS_LOCK),
+        (VK_SCROLL, SCROLL_LOCK),
+        (VK_KANA, KANA_LOCK),
+    ] {
+        // SAFETY: 呼び出しスレッドのキー状態を読むだけ。下位ビットがトグル状態。
+        if unsafe { GetKeyState(vk.0 as i32) } & 1 != 0 {
+            flags |= flag;
+        }
+    }
     let h = Header {
-        kind: Kind::Ime,
+        kind: Kind::Lock,
         cause,
         // SAFETY: 引数なしの単純な API。
         thread_id: unsafe { GetCurrentThreadId() },
@@ -308,7 +326,7 @@ fn notify_ime(hwnd: HWND, cause: u32) {
         flags,
     };
     let mut buf = [0u8; MAX_SIZE];
-    let n = write_ime(&mut buf, &h);
+    let n = write_lock(&mut buf, &h);
     send(&buf[..n]);
 }
 

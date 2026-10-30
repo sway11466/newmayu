@@ -119,10 +119,15 @@ impl Engine {
         &self.config
     }
 
+    /// 鍵の状態を 1 つ入れる（IME のオン・変換中、NumLock 等）。
+    pub fn set_lock(&mut self, m: LockMod, on: bool) {
+        self.locks.set(m, on);
+    }
+
     /// IME の状態を入れる。`on` は IME がオン（`IL-`）、`composing` は変換中（`IC-`）。
     pub fn set_ime(&mut self, on: bool, composing: bool) {
-        self.locks.set(LockMod::ImeLock, on);
-        self.locks.set(LockMod::ImeComp, composing);
+        self.set_lock(LockMod::ImeLock, on);
+        self.set_lock(LockMod::ImeComp, composing);
     }
 
     /// フォーカスが移った。`class` `title` はフック DLL が作る列（`model::WindowMatch` 参照）。
@@ -332,6 +337,7 @@ impl Engine {
                 Some(parent) => self.generate_keyboard_events(parent, cur, edge, depth + 1),
                 None => self.generate_default(key, event_mods, edge),
             },
+            Action::Ignore => {}
             Action::Func(f) => {
                 if edge == Edge::Down {
                     self.out.push(Output::Func {
@@ -766,6 +772,35 @@ mod tests {
         );
         // 離しでは何も出ない
         assert_eq!(e.feed(Input::up(X)), vec![]);
+    }
+
+    #[test]
+    fn ignore_outputs_nothing_and_num_lock_is_a_condition() {
+        let (config, mut global) = base();
+        let d = LockSpec::assign_default();
+        // key A = &Ignore / key NL-B = X / key ~NL-B = H
+        global.assign(A, ModSpec::none(), EdgeSpec::Both, d, vec![Action::Ignore]);
+        global.assign(
+            B,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            d.with(LockMod::NumLock),
+            vec![Action::key(X)],
+        );
+        global.assign(
+            B,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            d.without(LockMod::NumLock),
+            vec![Action::key(H)],
+        );
+        let mut e = engine(config, vec![global]);
+        assert_eq!(e.feed(Input::down(A)), vec![]);
+        assert_eq!(e.feed(Input::up(A)), vec![]);
+        assert_eq!(e.feed(Input::down(B)), vec![Output::Press(H)]);
+        e.feed(Input::up(B));
+        e.set_lock(LockMod::NumLock, true);
+        assert_eq!(e.feed(Input::down(B)), vec![Output::Press(X)]);
     }
 
     #[test]

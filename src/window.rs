@@ -9,10 +9,11 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN,
     RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RedrawWindow, ScreenToClient,
 };
+use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetCursorPos, GetParent, GetWindowLongPtrW,
     GetWindowRect, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic, IsWindow,
-    IsZoomed, LWA_ALPHA, PostMessageW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE,
+    IsZoomed, LWA_ALPHA, MB_OK, PostMessageW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE,
     SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
     SetCursorPos, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, WM_SYSCOMMAND,
     WS_CHILD, WS_EX_LAYERED, WS_EX_MDICHILD, WS_EX_TOPMOST,
@@ -178,6 +179,10 @@ impl WindowOps {
                             | SWP_NOZORDER,
                     )
                 };
+            }
+            Func::Undefined => {
+                // SAFETY: 単純な API。
+                let _ = unsafe { MessageBeep(MB_OK) };
             }
             Func::MouseMove { dx, dy } => {
                 let mut pt = POINT::default();

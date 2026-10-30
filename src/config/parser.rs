@@ -17,7 +17,9 @@
 //! key MODKEY... = ACTION...                    # ACTION = 修飾付きキー名 | $keyseq名 | ( ACTION... ) | &Prefix(KEYMAP)
 //!                                              #        | &Default | &KeymapParent | &OtherWindowClass
 //!                                              #        | &Window…([引数]) | &MouseMove(dx, dy)   （model::Func 参照）
-//!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）も書ける
+//!                                              #        | &Ignore | &Undefined
+//!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）
+//!                                              # NL- CL- SL- KL-（NumLock CapsLock ScrollLock カナ）も書ける
 //! mod MODNAME (=|+=|-=) KEY...
 //! keyseq $NAME = ACTION...                     # 使う側で展開する
 //! ```
@@ -27,7 +29,7 @@
 //! `U-` `D-` は押し・離しの区別（両方または無指定なら両方）。
 //! 未指定の `IC-` は「変換中でない」を要求し（yamy の既定）、`IL-` は dontcare。
 //!
-//! これ以外（`event`、`def option`、`def subst`、上記以外の `&関数`、`!`/`!!`/`!!!`、R- NL- CL- 等の割当修飾、2 個以上のスキャンコード）は
+//! これ以外（`event`、`def option`、`def subst`、上記以外の `&関数`、`!`/`!!`/`!!!`、R- MAX- 等の割当修飾、2 個以上のスキャンコード）は
 //! エラーにする。
 //!
 //! ファイルは BOM 無し UTF-8 のみ。大文字小文字は区別しない。
@@ -184,14 +186,18 @@ fn basic_mod_by_prefix(sym: &str) -> Option<BasicMod> {
 
 /// 読めるが未対応の修飾接頭辞（割当修飾・ロック類）。
 const UNSUPPORTED_MOD_PREFIXES: &[&str] = &[
-    "R-", "NL-", "CL-", "SL-", "KL-", "MAX-", "MIN-", "MMAX-", "MMIN-", "T-", "TS-", "L0-", "L1-",
-    "L2-", "L3-", "L4-", "L5-", "L6-", "L7-", "L8-", "L9-",
+    "R-", "MAX-", "MIN-", "MMAX-", "MMIN-", "T-", "TS-", "L0-", "L1-", "L2-", "L3-", "L4-", "L5-",
+    "L6-", "L7-", "L8-", "L9-",
 ];
 
 fn lock_mod_by_prefix(s: &str) -> Option<LockMod> {
     match s {
         "IL-" => Some(LockMod::ImeLock),
         "IC-" | "I-" => Some(LockMod::ImeComp),
+        "NL-" => Some(LockMod::NumLock),
+        "CL-" => Some(LockMod::CapsLock),
+        "SL-" => Some(LockMod::ScrollLock),
+        "KL-" => Some(LockMod::KanaLock),
         _ => None,
     }
 }
@@ -921,6 +927,10 @@ impl Loader {
                         out.push(Action::OtherWindowClass);
                         continue;
                     }
+                    if fname.eq_ignore_ascii_case("Ignore") {
+                        out.push(Action::Ignore);
+                        continue;
+                    }
                     if let Some(f) = self.load_func(&fname, cur)? {
                         out.push(Action::Func(f));
                         continue;
@@ -964,7 +974,7 @@ impl Loader {
             "windowmove" | "windowresizeto" => 3,
             "windowmoveto" => 4,
             "mousemove" => 2,
-            "windowtoggletopmost" | "windowredraw" => 0,
+            "windowtoggletopmost" | "windowredraw" | "undefined" => 0,
             "windowraise"
             | "windowlower"
             | "windowminimize"
@@ -1012,6 +1022,7 @@ impl Loader {
             "windowclingtotop" => a.cling(Gravity::North)?,
             "windowclingtobottom" => a.cling(Gravity::South)?,
             "windowtoggletopmost" => Func::WindowToggleTopMost,
+            "undefined" => Func::Undefined,
             "windowsetalpha" => Func::WindowSetAlpha(a.int(0)?),
             "windowredraw" => Func::WindowRedraw,
             "windowresizeto" => Func::WindowResizeTo {
@@ -1543,7 +1554,9 @@ keymap Sub : Global"
              key *IC-C-LShift = B
              key *RShift = B
              key ~IL-LControl = B
-             key ~*RControl = B",
+             key ~*RControl = B
+             key S-~NL-LAlt = B
+             key CL-SL-KL-Eisuu = B",
         );
         let g = global(&c);
         let d = LockSpec::assign_default();
@@ -1563,6 +1576,15 @@ keymap Sub : Global"
         assert_eq!(only(g, LCONTROL).locks, d.without(LockMod::ImeLock));
         // `~*` はキー名の直前の `*` と同じで、全部 dontcare
         assert_eq!(only(g, RCONTROL).locks, LockSpec::any());
+        let la = only(g, LALT);
+        assert_eq!(la.locks, d.without(LockMod::NumLock));
+        assert_eq!(la.mods, base().with(BasicMod::Shift));
+        assert_eq!(
+            only(g, EISUU).locks,
+            d.with(LockMod::CapsLock)
+                .with(LockMod::ScrollLock)
+                .with(LockMod::KanaLock)
+        );
     }
 
     #[test]
@@ -1649,7 +1671,8 @@ keymap Sub : Global"
              key Space = &WindowClingToLeft &WindowClingToBottom(MDI)
              key BackSpace = &WindowSetAlpha(70) &WindowToggleTopMost &WindowRedraw
              key LShift = &MouseMove(0, -1) &WindowResizeTo(0, -100)
-             key RShift = &WindowMoveTo(NE, 3, 4)",
+             key RShift = &WindowMoveTo(NE, 3, 4)
+             key LControl = &Ignore &Undefined",
         );
         let g = global(&c);
         let o = Target::Overlapped;
@@ -1721,6 +1744,15 @@ keymap Sub : Global"
                 dy: 4,
                 target: o
             })]
+        );
+        assert_eq!(
+            only(g, LCONTROL).actions,
+            vec![Action::Ignore, Action::Func(Func::Undefined)]
+        );
+        assert!(
+            load_err("key A = &Undefined(1)")
+                .message
+                .contains("引数が多い")
         );
         assert!(load_err("key A = &WindowMove").message.contains("引数"));
         assert!(load_err("key A = &WindowMove(1)").message.contains("引数"));
@@ -1797,7 +1829,7 @@ keymap Sub : Global"
         );
         assert!(load_err("key A = IL-B").message.contains("出力キー"));
         assert!(load_err("key A = IC-B").message.contains("出力キー"));
-        assert!(load_err("key NL-A = B").message.contains("未対応"));
+        assert!(load_err("key MAX-A = B").message.contains("未対応"));
         assert!(load_err("mod !shift = A").message.contains("未対応"));
         assert!(load_err("key A = $Nothing").message.contains("未定義"));
         assert!(load_err("keymap X : Nowhere").message.contains("未定義"));

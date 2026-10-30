@@ -28,10 +28,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use newmayu::config::parser;
 use newmayu::engine::{Engine, Input};
+use newmayu::model::LockMod;
 use newmayu::notify::{HookDll, Mailslot};
 use newmayu::platform;
 use newmayu::window::WindowOps;
-use newmayu_ipc::{Kind, Notify};
+use newmayu_ipc::{
+    CAPS_LOCK, IME_COMPOSING, IME_OPEN, KANA_LOCK, Kind, NUM_LOCK, Notify, SCROLL_LOCK,
+};
 
 const AUTO_EXIT_SECS: u64 = 60;
 const ESC_SCAN: u32 = 0x01;
@@ -132,16 +135,29 @@ fn main() -> ExitCode {
                 Event::Notify(n) => {
                     let h = n.header;
                     match h.kind {
-                        Kind::Ime => {
+                        Kind::Lock => {
                             eprintln!(
-                                "IME: on={} 変換中={} (thread={} hwnd={:#x} cause={})",
+                                "IME: on={} 変換中={} NL={} CL={} SL={} KL={} (thread={} hwnd={:#x} cause={})",
                                 h.ime_open(),
                                 h.ime_composing(),
+                                h.lock(NUM_LOCK),
+                                h.lock(CAPS_LOCK),
+                                h.lock(SCROLL_LOCK),
+                                h.lock(KANA_LOCK),
                                 h.thread_id,
                                 h.hwnd,
                                 h.cause
                             );
-                            engine.set_ime(h.ime_open(), h.ime_composing());
+                            for (flag, m) in [
+                                (IME_OPEN, LockMod::ImeLock),
+                                (IME_COMPOSING, LockMod::ImeComp),
+                                (NUM_LOCK, LockMod::NumLock),
+                                (CAPS_LOCK, LockMod::CapsLock),
+                                (SCROLL_LOCK, LockMod::ScrollLock),
+                                (KANA_LOCK, LockMod::KanaLock),
+                            ] {
+                                engine.set_lock(m, h.lock(flag));
+                            }
                         }
                         Kind::Focus => {
                             engine.set_focus(h.hwnd, &n.class, &n.title);
