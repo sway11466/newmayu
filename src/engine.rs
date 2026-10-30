@@ -3,7 +3,12 @@
 //! OS には依存しない。フック側はキー 1 つごとに [`Engine::feed`] を呼び、
 //! 返った [`Output`] を `SendInput` に流す（物理入力そのものは常に抑制する前提）。
 //! yamy の `Engine::keyboardHandler` 以降の流れのうち、基本修飾・キーマップ木・
-//! `key` 割付・キー出力・`&Prefix` だけを写している。
+//! `key` 割付・キー出力・`&Prefix`・窓によるキーマップ選択を写している。
+//!
+//! 窓の情報（クラス名の列・タイトルの列）はフック DLL から届き、[`Engine::set_focus`] で入る。
+//! 一致する `window` キーマップの列（yamy の `FocusOfThread::m_keymaps`）を持ち、
+//! 先頭から順に引く。割付が無いキーはそのキーマップの既定動作に落ちる
+//! （普通は `&KeymapParent` で親へ、`Global` は `&OtherWindowClass` で列の次へ）。
 
 use std::collections::HashSet;
 
@@ -43,6 +48,19 @@ pub enum Output {
 /// キーマップ木の探索が戻らないときの上限（yamy と同じ 64）。
 const MAX_KEYMAP_RECURSION: usize = 64;
 
+/// 1 キーの処理中に持ち回る値（yamy の `Engine::Current`）。
+#[derive(Clone, Copy)]
+struct Current {
+    /// 物理キー。`&Default` が使う。
+    key: Key,
+    /// 入力時の修飾の状態。割付の照合に使う。
+    state: ModState,
+    /// 出力キーの修飾を埋める元。自分が修飾キーならその修飾は dontcare。
+    event_mods: ModSpec,
+    /// 窓に一致するキーマップ列のうち、いま何番目を引いているか（`&OtherWindowClass` が進める）。
+    focus_idx: usize,
+}
+
 /// 割付の動作列のうち、どの部分を出すか。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Part {
@@ -56,7 +74,11 @@ enum Part {
 
 pub struct Engine {
     config: Config,
-    /// いまキーを解決するキーマップ。通常は `config.root`、`&Prefix` 後は遷移先。
+    /// 前景窓に一致する `window` キーマップの列（照合順）。先頭が通常の解決の起点。
+    focus: Vec<KeymapId>,
+    /// フォーカスを持つ窓。同じ窓の通知を繰り返し受けても引き直さないために覚える。
+    focus_hwnd: u64,
+    /// いまキーを解決するキーマップ。通常は `focus` の先頭、`&Prefix` 後は遷移先。
     current: KeymapId,
     /// `&Prefix` を受けて次の 1 キーを待っている。
     is_prefix: bool,
@@ -71,9 +93,13 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(config: Config) -> Self {
-        let current = config.root;
+        // 窓の情報が届くまでは、空の名前に一致するキーマップ（Global）を使う（yamy の global focus）
+        let focus = config.focus_keymaps("", "");
+        let current = focus.first().copied().unwrap_or(KeymapId(0));
         Engine {
             config,
+            focus,
+            focus_hwnd: 0,
             current,
             is_prefix: false,
             pressed: HashSet::new(),
@@ -91,6 +117,29 @@ impl Engine {
     pub fn set_ime(&mut self, on: bool, composing: bool) {
         self.locks.set(LockMod::ImeLock, on);
         self.locks.set(LockMod::ImeComp, composing);
+    }
+
+    /// フォーカスが移った。`class` `title` はフック DLL が作る列（`model::WindowMatch` 参照）。
+    /// 一致する `window` キーマップを引き直し、`&Prefix` の途中なら捨てる。
+    pub fn set_focus(&mut self, hwnd: u64, class: &str, title: &str) {
+        let focus = self.config.focus_keymaps(class, title);
+        if hwnd == self.focus_hwnd && focus == self.focus {
+            return;
+        }
+        self.focus = focus;
+        self.focus_hwnd = hwnd;
+        self.is_prefix = false;
+        self.current = self.root();
+    }
+
+    /// 通常の解決の起点（窓に一致するキーマップ列の先頭）。
+    fn root(&self) -> KeymapId {
+        self.focus.first().copied().unwrap_or(self.current)
+    }
+
+    /// いま窓に一致しているキーマップ列。
+    pub fn focus(&self) -> &[KeymapId] {
+        &self.focus
     }
 
     /// 1 イベントを処理し、OS に出すイベント列を返す。
@@ -124,16 +173,22 @@ impl Engine {
         if own_mod.is_none() && self.is_prefix {
             match edge {
                 Edge::Down => self.is_prefix = false,
-                Edge::Up => self.current = self.config.root,
+                Edge::Up => self.current = self.root(),
             }
         }
 
         let keymap_id = self.current;
-        self.generate_keyboard_events(keymap_id, key, state, event_mods, edge, 0);
+        let cur = Current {
+            key,
+            state,
+            event_mods,
+            focus_idx: 0,
+        };
+        self.generate_keyboard_events(keymap_id, cur, edge, 0);
 
         if own_mod.is_none() {
             if !self.is_prefix {
-                self.current = self.config.root;
+                self.current = self.root();
             } else if edge == Edge::Up {
                 self.current = saved;
             }
@@ -165,13 +220,12 @@ impl Engine {
         state
     }
 
-    /// キーマップで割付を探して動作を出す。無ければ親へ、親も無ければ素通し。
+    /// キーマップで割付を探して動作を出す。無ければそのキーマップの既定動作を出す
+    /// （yamy の `generateKeyboardEvents(Current)`）。
     fn generate_keyboard_events(
         &mut self,
         keymap_id: KeymapId,
-        key: Key,
-        state: ModState,
-        event_mods: ModSpec,
+        cur: Current,
         edge: Edge,
         depth: usize,
     ) {
@@ -180,25 +234,18 @@ impl Engine {
         }
         let locks = self.locks;
         let keymap = self.config.keymap(keymap_id);
-        match keymap.search(key, state, locks, edge) {
-            Some(a) => {
-                let part = match a.edge {
-                    EdgeSpec::Both => match edge {
-                        Edge::Down => Part::Down,
-                        Edge::Up => Part::Up,
-                    },
-                    EdgeSpec::Down | EdgeSpec::Up => Part::All,
-                };
-                let actions = a.actions.clone();
-                self.generate_key_seq_events(&actions, part, key, event_mods);
-            }
-            None => match keymap.parent {
-                Some(parent) => {
-                    self.generate_keyboard_events(parent, key, state, event_mods, edge, depth + 1)
-                }
-                None => self.generate_default(key, event_mods, edge),
+        let part_of = |spec: EdgeSpec| match spec {
+            EdgeSpec::Both => match edge {
+                Edge::Down => Part::Down,
+                Edge::Up => Part::Up,
             },
-        }
+            EdgeSpec::Down | EdgeSpec::Up => Part::All,
+        };
+        let (actions, part) = match keymap.search(cur.key, cur.state, locks, edge) {
+            Some(a) => (a.actions.clone(), part_of(a.edge)),
+            None => (keymap.default_actions.clone(), part_of(EdgeSpec::Both)),
+        };
+        self.generate_key_seq_events(&actions, part, keymap_id, cur, depth);
     }
 
     /// 割付の無いキー、または `&Default` の動作: 物理キーをそのまま通す。
@@ -213,28 +260,29 @@ impl Engine {
         }
     }
 
-    /// `key` は割付を引いた物理キー（`&Default` が使う）。
+    /// `keymap_id` は動作列を引いたキーマップ（`&KeymapParent` が親をたどる起点）。
     fn generate_key_seq_events(
         &mut self,
         actions: &[Action],
         part: Part,
-        key: Key,
-        event_mods: ModSpec,
+        keymap_id: KeymapId,
+        cur: Current,
+        depth: usize,
     ) {
         let Some((last, head)) = actions.split_last() else {
             return;
         };
         if part == Part::Up {
-            self.generate_action_events(last, Edge::Up, key, event_mods);
+            self.generate_action_events(last, Edge::Up, keymap_id, cur, depth);
             return;
         }
         for a in head {
-            self.generate_action_events(a, Edge::Down, key, event_mods);
-            self.generate_action_events(a, Edge::Up, key, event_mods);
+            self.generate_action_events(a, Edge::Down, keymap_id, cur, depth);
+            self.generate_action_events(a, Edge::Up, keymap_id, cur, depth);
         }
-        self.generate_action_events(last, Edge::Down, key, event_mods);
+        self.generate_action_events(last, Edge::Down, keymap_id, cur, depth);
         if part == Part::All {
-            self.generate_action_events(last, Edge::Up, key, event_mods);
+            self.generate_action_events(last, Edge::Up, keymap_id, cur, depth);
         }
     }
 
@@ -242,9 +290,13 @@ impl Engine {
         &mut self,
         action: &Action,
         edge: Edge,
-        key: Key,
-        event_mods: ModSpec,
+        keymap_id: KeymapId,
+        cur: Current,
+        depth: usize,
     ) {
+        let Current {
+            key, event_mods, ..
+        } = cur;
         match action {
             Action::Key {
                 key,
@@ -270,6 +322,23 @@ impl Engine {
                 }
             }
             Action::Default => self.generate_default(key, event_mods, edge),
+            Action::KeymapParent => match self.config.keymap(keymap_id).parent {
+                Some(parent) => self.generate_keyboard_events(parent, cur, edge, depth + 1),
+                None => self.generate_default(key, event_mods, edge),
+            },
+            Action::OtherWindowClass => {
+                let next = cur.focus_idx + 1;
+                match self.focus.get(next) {
+                    Some(&k) => {
+                        let cur = Current {
+                            focus_idx: next,
+                            ..cur
+                        };
+                        self.generate_keyboard_events(k, cur, edge, depth + 1)
+                    }
+                    None => self.generate_default(key, event_mods, edge),
+                }
+            }
         }
     }
 
@@ -312,7 +381,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Action, Keymap, LockSpec};
+    use crate::model::{Action, Keymap, LockSpec, WindowMatch, WindowOp};
 
     // 109.mayu のスキャンコード
     const A: Key = Key::plain(0x1e);
@@ -330,9 +399,9 @@ mod tests {
 
     /// `def mod Control = LControl RControl` と、それを継承した Global キーマップ。
     fn base() -> (Config, Keymap) {
-        let mut config = Config::new(Vec::new(), GLOBAL);
+        let mut config = Config::new(Vec::new());
         config.def_mod(BasicMod::Control, [L_CONTROL, R_CONTROL]);
-        let mut global = Keymap::new("Global", None);
+        let mut global = Keymap::global();
         global.add_mod_key(BasicMod::Control, L_CONTROL);
         global.add_mod_key(BasicMod::Control, R_CONTROL);
         (config, global)
@@ -572,6 +641,118 @@ mod tests {
         e.set_ime(true, true);
         assert_eq!(e.feed(Input::down(A)), vec![Output::Press(X)]);
         assert_eq!(e.feed(Input::up(A)), vec![Output::Release(X)]);
+    }
+
+    #[test]
+    fn window_keymaps_are_tried_in_order() {
+        let (config, mut global) = base();
+        let any = LockSpec::any();
+        // keymap Global:                 key A = B
+        // keymap EmacsEdit : Global:     key F = Right
+        // window Edit /:Edit$/ : EmacsEdit:  key H = BackSpace
+        // window Note /notepad/ : Global:    key X = B      （後に定義 → 先に照合）
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            any,
+            vec![Action::key(B)],
+        );
+        let mut emacs = Keymap::new("EmacsEdit", Some(GLOBAL));
+        emacs.assign(
+            F,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            any,
+            vec![Action::key(RIGHT)],
+        );
+        let mut edit = Keymap::new("Edit", Some(KeymapId(1)));
+        edit.window = Some(WindowMatch::new(":Edit$", None, WindowOp::And).unwrap());
+        edit.assign(
+            H,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            any,
+            vec![Action::key(BACK_SPACE)],
+        );
+        let mut note = Keymap::new("Note", Some(GLOBAL));
+        note.window = Some(WindowMatch::new("notepad", None, WindowOp::And).unwrap());
+        note.assign(
+            X,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            any,
+            vec![Action::key(B)],
+        );
+        let mut e = engine(config, vec![global, emacs, edit, note]);
+
+        // 窓の情報が無いうちは Global だけ
+        assert_eq!(e.focus(), &[GLOBAL]);
+        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(H)]);
+        e.feed(Input::up(H));
+
+        e.set_focus(0x10, "notepad.exe:Notepad:Edit", "無題 - メモ帳");
+        assert_eq!(e.focus(), &[KeymapId(3), KeymapId(2), GLOBAL]);
+        // Note で当たる
+        assert_eq!(e.feed(Input::down(X)), vec![Output::Press(B)]);
+        e.feed(Input::up(X));
+        // Note → 親 Global → &OtherWindowClass → Edit で当たる
+        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(BACK_SPACE)]);
+        e.feed(Input::up(H));
+        // Note → Global → Edit → 親 EmacsEdit で当たる
+        assert_eq!(e.feed(Input::down(F)), vec![Output::Press(RIGHT)]);
+        e.feed(Input::up(F));
+        // Note → Global で当たる（Global は Note の親として先に引かれる）
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+        e.feed(Input::up(A));
+        // どこにも無い: 素通し
+        assert_eq!(
+            e.feed(Input::down(CAPS_LOCK)),
+            vec![Output::Press(CAPS_LOCK)]
+        );
+        e.feed(Input::up(CAPS_LOCK));
+
+        // 別の窓: Global だけに戻る
+        e.set_focus(0x20, "chrome.exe:Chrome_WidgetWin_1", "");
+        assert_eq!(e.focus(), &[GLOBAL]);
+        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(H)]);
+        e.feed(Input::up(H));
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+    }
+
+    #[test]
+    fn keymap_default_actions() {
+        let (config, mut global) = base();
+        let any = LockSpec::any();
+        // keymap KeymapDefault = &Default
+        // keymap Global: key A = B / key X = &Prefix(KeymapDefault)
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            any,
+            vec![Action::key(B)],
+        );
+        let kd = KeymapId(1);
+        global.assign(
+            X,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            any,
+            vec![Action::Prefix(kd)],
+        );
+        let mut keymap_default = Keymap::new("KeymapDefault", None);
+        keymap_default.default_actions = vec![Action::Default];
+        let mut e = engine(config, vec![global, keymap_default]);
+
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+        e.feed(Input::up(A));
+        // X の次の 1 キーは KeymapDefault で解決: 親が無くても &Default で素通し
+        assert_eq!(e.feed(Input::down(X)), vec![]);
+        e.feed(Input::up(X));
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(A)]);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(A)]);
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
     }
 
     #[test]

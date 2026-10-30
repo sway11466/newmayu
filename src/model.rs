@@ -4,6 +4,9 @@
 //! 修飾の表現は yamy に倣い「押下」「dontcare」の 2 本のビット列で持つ（照合が 1 行で済む）。
 //! yamy が一つの列挙に混ぜていた基本修飾（C- S- A- W- M0-9）とキーシーケンス修飾（D- U-）は
 //! 型を分ける。割当修飾のうち鍵の状態で決まるもの（IL- IC-）は `LockMod` として別に持つ。
+//! `window` 文の窓の条件は `WindowMatch`。
+
+use regex::{Regex, RegexBuilder};
 
 /// スキャンコードの前置バイト。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -311,6 +314,83 @@ impl LockSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct KeymapId(pub usize);
 
+/// `( /クラス/ && /タイトル/ )` か `( /クラス/ || /タイトル/ )` か。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowOp {
+    And,
+    Or,
+}
+
+/// `window` 文の窓の条件（yamy の `Keymap::doesSameWindow`）。
+///
+/// 照合する相手は、フック DLL がフォーカス窓から親をたどって作る 2 本の文字列:
+/// クラス名の列 `exe名:クラス:…:クラス` と、タイトルの列（同じ順）。
+/// 正規表現は大文字小文字を区別せず、文字列のどこかに一致すればよい。
+#[derive(Clone, Debug)]
+pub struct WindowMatch {
+    class: Regex,
+    title: Regex,
+    class_src: String,
+    title_src: String,
+    op: WindowOp,
+}
+
+impl WindowMatch {
+    /// `window NAME /クラス/` は `( /クラス/ && /.*/ )` と同じ。
+    /// 正規表現が読めなければその理由を返す。
+    pub fn new(class: &str, title: Option<&str>, op: WindowOp) -> Result<WindowMatch, String> {
+        let class_src = if class.is_empty() { ".*" } else { class }.to_string();
+        let title_src = match title {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => ".*".to_string(),
+        };
+        let build = |src: &str| {
+            RegexBuilder::new(src)
+                .case_insensitive(true)
+                .build()
+                .map_err(|e| format!("/{src}/: {e}"))
+        };
+        Ok(WindowMatch {
+            class: build(&class_src)?,
+            title: build(&title_src)?,
+            class_src,
+            title_src,
+            op,
+        })
+    }
+
+    /// 全部の窓に一致する（`Global` 用）。
+    pub fn any() -> WindowMatch {
+        WindowMatch::new("", None, WindowOp::Or).expect(".* は正しい正規表現")
+    }
+
+    pub fn matches(&self, class: &str, title: &str) -> bool {
+        match self.op {
+            WindowOp::And => self.class.is_match(class) && self.title.is_match(title),
+            WindowOp::Or => self.class.is_match(class) || self.title.is_match(title),
+        }
+    }
+
+    pub fn class_src(&self) -> &str {
+        &self.class_src
+    }
+    pub fn title_src(&self) -> &str {
+        &self.title_src
+    }
+    pub fn op(&self) -> WindowOp {
+        self.op
+    }
+}
+
+impl PartialEq for WindowMatch {
+    fn eq(&self, other: &Self) -> bool {
+        self.class_src == other.class_src
+            && self.title_src == other.title_src
+            && self.op == other.op
+    }
+}
+impl Eq for WindowMatch {}
+
 /// 割付の右辺に並ぶ動作。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -325,6 +405,12 @@ pub enum Action {
     Prefix(KeymapId),
     /// `&Default`: 押された物理キーをそのまま出す（割付が無いときと同じ）。
     Default,
+    /// `&KeymapParent`: 親キーマップで引き直す。親が無ければ `&Default`。
+    /// `keymap` / `window` の既定動作。
+    KeymapParent,
+    /// `&OtherWindowClass`: いまの窓に一致する次の `window` キーマップで引き直す。
+    /// 次が無ければ `&Default`。`Global` の既定動作。
+    OtherWindowClass,
 }
 
 impl Action {
@@ -354,25 +440,43 @@ pub struct Assignment {
     pub actions: Vec<Action>,
 }
 
-/// `keymap 名 : 親` の 1 つ。
+/// `keymap 名 : 親` / `window 名 /re/ : 親` の 1 つ。
 ///
 /// `mod_keys` は読み込み時に親から継承・加減算を済ませた結果（yamy の `Keymap::adjustModifier`）。
 /// エンジンは現在のキーマップの `mod_keys` だけを見る。
+///
+/// `window` が `Some` のキーマップは、前景窓が条件に合うとき自動で選ばれる。
+/// `None` のキーマップ（`keymap`）は親や `&Prefix` 経由でしか使われない。
+/// `default_actions` は割付の無いキーに使う動作列（yamy の default keyseq）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Keymap {
     pub name: String,
     pub parent: Option<KeymapId>,
+    pub window: Option<WindowMatch>,
+    pub default_actions: Vec<Action>,
     pub mod_keys: [Vec<Key>; BasicMod::ALL.len()],
     pub assignments: Vec<Assignment>,
 }
 
 impl Keymap {
+    /// `keymap 名 : 親`。既定動作は `&KeymapParent`。
     pub fn new(name: impl Into<String>, parent: Option<KeymapId>) -> Self {
         Keymap {
             name: name.into(),
             parent,
+            window: None,
+            default_actions: vec![Action::KeymapParent],
             mod_keys: Default::default(),
             assignments: Vec::new(),
+        }
+    }
+
+    /// yamy が最初から作る `Global`: 全部の窓に一致し、既定動作は `&OtherWindowClass`。
+    pub fn global() -> Self {
+        Keymap {
+            window: Some(WindowMatch::any()),
+            default_actions: vec![Action::OtherWindowClass],
+            ..Keymap::new("Global", None)
         }
     }
 
@@ -438,24 +542,33 @@ impl Keymap {
     }
 }
 
-/// 読み込んだ設定の全体。
+/// 読み込んだ設定の全体。`keymaps` は定義順。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub keymaps: Vec<Keymap>,
-    /// 前景窓から選ばれるキーマップ。窓別の選択はまだ無く、常にこれ。
-    pub root: KeymapId,
     /// `def mod Control = LControl RControl`。出力側で修飾を押す／離すときに使う物理キー。
     /// Shift / Alt / Control / Windows のみ。Mod0〜9 は出力されない。
     pub def_mods: [Vec<Key>; BasicMod::ALL.len()],
 }
 
 impl Config {
-    pub fn new(keymaps: Vec<Keymap>, root: KeymapId) -> Self {
+    pub fn new(keymaps: Vec<Keymap>) -> Self {
         Config {
             keymaps,
-            root,
             def_mods: Default::default(),
         }
+    }
+
+    /// 前景窓に一致する `window` キーマップを、照合する順に並べる。
+    /// yamy は後に定義したものほど先に照合する（`Global` は最初に作られるので最後）。
+    pub fn focus_keymaps(&self, class: &str, title: &str) -> Vec<KeymapId> {
+        self.keymaps
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, k)| k.window.as_ref().is_some_and(|w| w.matches(class, title)))
+            .map(|(i, _)| KeymapId(i))
+            .collect()
     }
 
     pub fn def_mod(&mut self, m: BasicMod, keys: impl IntoIterator<Item = Key>) {

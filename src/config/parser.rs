@@ -10,8 +10,12 @@
 //! def mod (shift|alt|control|windows) = KEY...
 //! def alias NAME = KEY
 //! def sync = SCANCODE                          # 読むだけ（&Sync は未対応）
-//! keymap NAME [: PARENT]                      # 同名の再宣言はそのキーマップに戻る
-//! key MODKEY... = ACTION...                    # ACTION = 修飾付きキー名 | $keyseq名 | ( ACTION... ) | &Prefix(KEYMAP) | &Default
+//! keymap NAME [: PARENT] [= ACTION...]        # 同名の再宣言はそのキーマップに戻る。= は割付の無いキーの既定動作
+//! keymap2 NAME [: PARENT] [= ACTION...]       # keymap と同じ（yamy でも同じ）
+//! window NAME [WINDOW] [: PARENT] [= ACTION...]
+//!                                              # WINDOW = /クラス/ | ( /クラス/ && /タイトル/ ) | ( /クラス/ || /タイトル/ )
+//! key MODKEY... = ACTION...                    # ACTION = 修飾付きキー名 | $keyseq名 | ( ACTION... ) | &Prefix(KEYMAP)
+//!                                              #        | &Default | &KeymapParent | &OtherWindowClass
 //!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）も書ける
 //! mod MODNAME (=|+=|-=) KEY...
 //! keyseq $NAME = ACTION...                     # 使う側で展開する
@@ -22,8 +26,7 @@
 //! `U-` `D-` は押し・離しの区別（両方または無指定なら両方）。
 //! 未指定の `IC-` は「変換中でない」を要求し（yamy の既定）、`IL-` は dontcare。
 //!
-//! これ以外（`window`、`keymap2`、`event`、`def option`、`def subst`、
-//! `&Prefix` `&Default` 以外の `&関数`、`!`/`!!`/`!!!`、R- NL- CL- 等の割当修飾、2 個以上のスキャンコード）は
+//! これ以外（`event`、`def option`、`def subst`、上記以外の `&関数`、`!`/`!!`/`!!!`、R- NL- CL- 等の割当修飾、2 個以上のスキャンコード）は
 //! エラーにする。
 //!
 //! ファイルは BOM 無し UTF-8 のみ。大文字小文字は区別しない。
@@ -35,7 +38,7 @@ use std::path::{Path, PathBuf};
 use super::lexer::{Line, Token, tokenize};
 use crate::model::{
     Action, BasicMod, Config, EdgeSpec, Key, Keymap, KeymapId, LockMod, LockSpec, ModSpec,
-    ScanPrefix,
+    ScanPrefix, WindowMatch, WindowOp,
 };
 
 /// 最大の include 深さ。循環 include もこれで止まる。
@@ -211,7 +214,7 @@ enum Flag {
 impl Loader {
     fn new() -> Self {
         let global = KeymapBuild {
-            keymap: Keymap::new("Global", None),
+            keymap: Keymap::global(),
             mod_ops: Default::default(),
         };
         let mut keymap_names = HashMap::new();
@@ -330,11 +333,12 @@ impl Loader {
             "include" => self.load_include(cur, dir, depth),
             "define" => self.load_define(cur),
             "def" => self.load_def(cur),
-            "keymap" => self.load_keymap(cur),
+            "keymap" | "keymap2" => self.load_keymap(cur, false),
+            "window" => self.load_keymap(cur, true),
             "key" => self.load_key(cur),
             "mod" => self.load_mod(cur),
             "keyseq" => self.load_keyseq(cur),
-            "window" | "keymap2" | "event" => self.err(format!("`{head}` は未対応")),
+            "event" => self.err(format!("`{head}` は未対応")),
             _ => self.err(format!("知らない文 `{head}`")),
         }
     }
@@ -583,12 +587,32 @@ impl Loader {
         Ok(())
     }
 
-    /// `keymap NAME [: PARENT]`
-    fn load_keymap(&mut self, cur: &mut Cur) -> Result<()> {
+    /// `keymap NAME [: PARENT] [= ACTION...]` / `window NAME [WINDOW] [: PARENT] [= ACTION...]`
+    fn load_keymap(&mut self, cur: &mut Cur, is_window: bool) -> Result<()> {
         let Some(t) = cur.next() else {
             return self.err("keymap の後は名前");
         };
         let name = self.name_of(t)?;
+        // 窓の条件。`window NAME : PARENT` のように条件が無ければ、yamy と同じく普通の keymap
+        let mut window = None;
+        if is_window {
+            if cur.peek_sym("(") {
+                cur.next();
+                let class = self.regex_of(cur.next())?;
+                let op = match cur.next() {
+                    Some(Token::Sym("&&")) => WindowOp::And,
+                    Some(Token::Sym("||")) => WindowOp::Or,
+                    Some(t) => return self.err(format!("`&&` か `||` が要る所に `{t}`")),
+                    None => return self.err("`&&` か `||` が無い"),
+                };
+                let title = self.regex_of(cur.next())?;
+                self.expect_sym(cur, ")")?;
+                window = Some(self.window_match(&class, Some(&title), op)?);
+            } else if let Some(Token::Regex(_)) = cur.peek() {
+                let class = self.regex_of(cur.next())?;
+                window = Some(self.window_match(&class, None, WindowOp::And)?);
+            }
+        }
         let mut parent = None;
         if cur.peek_sym(":") {
             cur.next();
@@ -601,29 +625,64 @@ impl Loader {
             };
             parent = Some(KeymapId(idx));
         }
-        if !cur.at_end() {
-            return self.err("keymap の既定動作（`keymap NAME = ...`）は未対応");
+        // 既定動作（割付の無いキーに使う）
+        let mut default_actions = None;
+        if cur.peek_sym("=") || cur.peek_sym("=>") {
+            cur.next();
+            default_actions = Some(self.load_actions(cur, false)?);
         }
+        self.expect_end(cur)?;
         let l = lower(&name);
         // 同名の再宣言はそのキーマップに戻る（yamy の `Keymaps::add` は既存を返す）。
-        // yamy は 2 回目の親指定を黙って捨てるが、ここでは食い違えばエラーにする。
+        // yamy は 2 回目の親指定・既定動作を黙って捨てるが、ここでは食い違えばエラーにする。
         if let Some(&idx) = self.keymap_names.get(&l) {
-            if parent.is_some() && parent != self.keymaps[idx].keymap.parent {
+            let km = &self.keymaps[idx].keymap;
+            if parent.is_some() && parent != km.parent {
                 return self.err(format!(
                     "キーマップ `{name}` は定義済みで、親は変えられない"
+                ));
+            }
+            if default_actions.is_some_and(|a| a != km.default_actions) {
+                return self.err(format!(
+                    "キーマップ `{name}` は定義済みで、既定動作は変えられない"
+                ));
+            }
+            if window.is_some() && window != km.window {
+                return self.err(format!(
+                    "キーマップ `{name}` は定義済みで、窓の条件は変えられない"
                 ));
             }
             self.current = idx;
             return Ok(());
         }
         let idx = self.keymaps.len();
+        let mut keymap = Keymap::new(name, parent);
+        keymap.window = window;
+        if let Some(a) = default_actions {
+            keymap.default_actions = a;
+        }
         self.keymaps.push(KeymapBuild {
-            keymap: Keymap::new(name, parent),
+            keymap,
             mod_ops: Default::default(),
         });
         self.keymap_names.insert(l, idx);
         self.current = idx;
         Ok(())
+    }
+
+    fn regex_of(&self, t: Option<&Token>) -> Result<String> {
+        match t {
+            Some(Token::Regex(s)) => Ok(s.clone()),
+            Some(t) => self.err(format!("正規表現 `/…/` が要る所に `{t}`")),
+            None => self.err("正規表現 `/…/` が無い"),
+        }
+    }
+
+    fn window_match(&self, class: &str, title: Option<&str>, op: WindowOp) -> Result<WindowMatch> {
+        match WindowMatch::new(class, title, op) {
+            Ok(w) => Ok(w),
+            Err(e) => self.err(format!("正規表現が読めない: {e}")),
+        }
     }
 
     /// `key MODKEY... = ACTION...`
@@ -756,6 +815,14 @@ impl Loader {
                     let fname = self.name_of(t)?;
                     if fname.eq_ignore_ascii_case("Default") {
                         out.push(Action::Default);
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("KeymapParent") {
+                        out.push(Action::KeymapParent);
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("OtherWindowClass") {
+                        out.push(Action::OtherWindowClass);
                         continue;
                     }
                     if !fname.eq_ignore_ascii_case("Prefix") {
@@ -994,7 +1061,7 @@ impl Loader {
             }
             resolved.push(km);
         }
-        let mut config = Config::new(resolved, KeymapId(0));
+        let mut config = Config::new(resolved);
         for (i, keys) in self.def_mods.iter().enumerate() {
             config.def_mod(BasicMod::ALL[i], keys.iter().copied());
         }
@@ -1059,6 +1126,10 @@ mod tests {
         load_str(&src, "test", Path::new(".")).expect_err("エラーになるはず")
     }
 
+    fn global(c: &Config) -> &Keymap {
+        &c.keymaps[0]
+    }
+
     fn only(km: &Keymap, key: Key) -> &Assignment {
         let v: Vec<_> = km.assignments.iter().filter(|a| a.key == key).collect();
         assert_eq!(v.len(), 1, "{key:?} の割付が 1 件でない: {v:?}");
@@ -1073,7 +1144,7 @@ mod tests {
             c.def_mods[BasicMod::Control.index()],
             vec![LCONTROL, RCONTROL]
         );
-        let g = c.keymap(c.root);
+        let g = global(&c);
         assert_eq!(g.name, "Global");
         assert_eq!(g.mod_keys[BasicMod::Shift.index()], vec![LSHIFT, RSHIFT]);
         let a = only(g, A);
@@ -1093,7 +1164,7 @@ mod tests {
              key D-BackSpace = B
              key U-LAlt = S-*B D-LShift U-LShift",
         );
-        let g = c.keymap(c.root);
+        let g = global(&c);
         assert_eq!(
             only(g, A).mods,
             base().with(BasicMod::Control).with(BasicMod::Shift)
@@ -1242,7 +1313,7 @@ keymap Sub : Global"
              endif
              key LAlt = B",
         );
-        let g = c.keymap(c.root);
+        let g = global(&c);
         let keys: Vec<Key> = g.assignments.iter().map(|a| a.key).collect();
         assert!(keys.contains(&A));
         assert_eq!(only(g, H).actions[0], Action::key_with(A, base()));
@@ -1273,7 +1344,7 @@ keymap Sub : Global"
              key ~IL-LControl = B
              key ~*RControl = B",
         );
-        let g = c.keymap(c.root);
+        let g = global(&c);
         let d = LockSpec::assign_default();
         // 既定: 変換中でないことを要求、IME オンは問わない
         assert!(!d.is_dontcare(LockMod::ImeComp) && !d.is_on(LockMod::ImeComp));
@@ -1294,9 +1365,83 @@ keymap Sub : Global"
     }
 
     #[test]
+    fn window_and_keymap2() {
+        let c = load_ok(
+            "window Edit /:Edit$/ : Global
+              key A = H
+             window Both ( /notepad/ && /メモ帳/ ) : Edit
+             window Either ( /qq/ || /zz/ )
+             keymap2 Sub : Global = &KeymapParent
+             keymap KeymapDefault = &Default
+             window Plain : Global
+             keymap Global",
+        );
+        let by_name = |n: &str| c.keymaps.iter().position(|k| k.name == n).unwrap();
+        let g = global(&c);
+        assert_eq!(g.default_actions, vec![Action::OtherWindowClass]);
+        assert!(g.window.as_ref().unwrap().matches("", ""));
+
+        let edit = &c.keymaps[by_name("Edit")];
+        let w = edit.window.as_ref().unwrap();
+        assert!(w.matches("notepad.exe:Notepad:Edit", ""));
+        assert!(w.matches("x:EDIT", "大文字小文字は区別しない"));
+        assert!(!w.matches("x:Editor", ""));
+        assert_eq!(edit.default_actions, vec![Action::KeymapParent]);
+        assert_eq!(only(edit, A).actions, vec![Action::key_with(H, base())]);
+
+        let both = c.keymaps[by_name("Both")].window.as_ref().unwrap();
+        assert!(both.matches("notepad.exe:Edit", "無題 - メモ帳"));
+        assert!(!both.matches("notepad.exe:Edit", ""));
+        let either = c.keymaps[by_name("Either")].window.as_ref().unwrap();
+        assert!(either.matches("qq", ""));
+        assert!(either.matches("", "zz"));
+        assert!(!either.matches("", ""));
+
+        assert_eq!(
+            c.keymaps[by_name("Sub")].default_actions,
+            vec![Action::KeymapParent]
+        );
+        assert_eq!(
+            c.keymaps[by_name("KeymapDefault")].default_actions,
+            vec![Action::Default]
+        );
+        let plain = &c.keymaps[by_name("Plain")];
+        assert!(plain.window.is_none(), "条件の無い window は普通の keymap");
+        assert_eq!(plain.parent, Some(KeymapId(0)));
+
+        // 後に定義した window ほど先。Global は最後
+        assert_eq!(
+            c.focus_keymaps("notepad.exe:Notepad:Edit", "無題 - メモ帳"),
+            vec![
+                KeymapId(by_name("Both")),
+                KeymapId(by_name("Edit")),
+                KeymapId(0)
+            ]
+        );
+        assert_eq!(c.focus_keymaps("chrome.exe:Chrome", ""), vec![KeymapId(0)]);
+
+        assert!(
+            load_err("window Bad /(/ : Global")
+                .message
+                .contains("正規表現")
+        );
+        assert!(load_err("window Bad ( /a/ /b/ )").message.contains("`&&`"));
+        assert!(
+            load_err("keymap K = &Default\nkeymap K = &KeymapParent")
+                .message
+                .contains("既定動作")
+        );
+        assert!(
+            load_err("window W /a/\nwindow W /b/")
+                .message
+                .contains("窓の条件")
+        );
+    }
+
+    #[test]
     fn later_assignment_wins() {
         let c = load_ok("key A = B\nkey A = H");
-        let g = c.keymap(c.root);
+        let g = global(&c);
         let found = g
             .search(A, ModState::empty(), LockState::empty(), Edge::Down)
             .unwrap();
@@ -1316,7 +1461,7 @@ keymap Sub : Global"
         .unwrap();
         std::fs::write(sub.join("inner.mayu"), "key A = B\n").unwrap();
         let c = load(&dir.join("top.mayu")).unwrap();
-        let g = c.keymap(c.root);
+        let g = global(&c);
         assert_eq!(g.assignments.len(), 2);
         assert_eq!(only(g, A).actions.len(), 1);
 
@@ -1356,11 +1501,7 @@ keymap Sub : Global"
         assert!(load_err("key A = $Nothing").message.contains("未定義"));
         assert!(load_err("keymap X : Nowhere").message.contains("未定義"));
         assert!(load_err("def key A = 0x01").message.contains("定義済み"));
-        assert!(
-            load_err("window Foo /x/ : Global")
-                .message
-                .contains("未対応")
-        );
+        assert!(load_err("event prefixed = A").message.contains("未対応"));
         assert!(load_err("key C- = B").message.contains("未対応"));
     }
 }

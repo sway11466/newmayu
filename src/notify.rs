@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use newmayu_ipc::{MAILSLOT_NAME, Notify};
+use newmayu_ipc::{MAILSLOT_NAME, MAX_SIZE, Notify};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE};
 use windows::Win32::Storage::FileSystem::ReadFile;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -76,22 +76,15 @@ pub struct Mailslot {
 
 impl Mailslot {
     pub fn create() -> Result<Mailslot, String> {
-        // SAFETY: 名前は NUL 終端の UTF-16。待ち時間なし（MAILSLOT_WAIT_FOREVER）。
-        let handle = unsafe {
-            CreateMailslotW(
-                &HSTRING::from(MAILSLOT_NAME),
-                Notify::SIZE as u32,
-                u32::MAX,
-                None,
-            )
-        }
-        .map_err(|e| format!("メールスロットを作れない: {e}"))?;
+        // SAFETY: 名前は NUL 終端の UTF-16。長さの上限なし（0）、読み取りは待ち続ける（MAILSLOT_WAIT_FOREVER）。
+        let handle = unsafe { CreateMailslotW(&HSTRING::from(MAILSLOT_NAME), 0, u32::MAX, None) }
+            .map_err(|e| format!("メールスロットを作れない: {e}"))?;
         Ok(Mailslot { handle })
     }
 
     /// 1 通知を待って読む。形が違うものは読み飛ばす。読めなくなったら `None`。
     pub fn read(&self) -> Option<Notify> {
-        let mut buf = [0u8; Notify::SIZE];
+        let mut buf = [0u8; MAX_SIZE];
         loop {
             let mut len = 0u32;
             // SAFETY: handle は有効なメールスロット。buf は十分な長さ。

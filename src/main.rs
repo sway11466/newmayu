@@ -30,7 +30,7 @@ use newmayu::config::parser;
 use newmayu::engine::{Engine, Input};
 use newmayu::notify::{HookDll, Mailslot};
 use newmayu::platform;
-use newmayu_ipc::Notify;
+use newmayu_ipc::{Kind, Notify};
 
 const AUTO_EXIT_SECS: u64 = 60;
 const ESC_SCAN: u32 = 0x01;
@@ -127,15 +127,32 @@ fn main() -> ExitCode {
                     platform::send(&outputs);
                 }
                 Event::Notify(n) => {
-                    eprintln!(
-                        "IME: on={} 変換中={} (thread={} hwnd={:#x} cause={})",
-                        n.ime_open(),
-                        n.ime_composing(),
-                        n.thread_id,
-                        n.hwnd,
-                        n.cause
-                    );
-                    engine.set_ime(n.ime_open(), n.ime_composing());
+                    let h = n.header;
+                    match h.kind {
+                        Kind::Ime => {
+                            eprintln!(
+                                "IME: on={} 変換中={} (thread={} hwnd={:#x} cause={})",
+                                h.ime_open(),
+                                h.ime_composing(),
+                                h.thread_id,
+                                h.hwnd,
+                                h.cause
+                            );
+                            engine.set_ime(h.ime_open(), h.ime_composing());
+                        }
+                        Kind::Focus => {
+                            engine.set_focus(h.hwnd, &n.class, &n.title);
+                            let names: Vec<&str> = engine
+                                .focus()
+                                .iter()
+                                .map(|k| engine.config().keymap(*k).name.as_str())
+                                .collect();
+                            eprintln!(
+                                "FOCUS: {} | {} (thread={} hwnd={:#x} cause={}) -> {:?}",
+                                n.class, n.title, h.thread_id, h.hwnd, h.cause, names
+                            );
+                        }
+                    }
                 }
             }
         }

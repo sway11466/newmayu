@@ -2,7 +2,9 @@
 //!
 //! 本体が `newmayu_hook_install` を呼ぶと、`WH_GETMESSAGE` と `WH_CALLWNDPROC` を全スレッド対象で
 //! 掛ける。OS がこの DLL を各 GUI プロセスに読み込み、そのプロセスの窓メッセージがここを通る。
-//! ここで IME の状態（オン・変換中）の変化を見つけ、本体のメールスロットに通知を書く。
+//! ここで IME の状態（オン・変換中）の変化と、フォーカスの移動を見つけ、本体のメールスロットに
+//! 通知を書く。フォーカスの通知には、フォーカス窓から親をたどったクラス名の列
+//! （`exe名:クラス:…:クラス`）とタイトルの列を載せる（yamy の `getClassNameTitleName`）。
 //!
 //! 他プロセスの中で動くので、やることを最小にする:
 //! - 状態は atomic の static だけ。ヒープも std のスレッドローカルも使わない
@@ -11,21 +13,28 @@
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
-use newmayu_ipc::{IME_COMPOSING, IME_OPEN, Kind, MAILSLOT_NAME, Notify};
+use newmayu_ipc::{
+    Header, IME_COMPOSING, IME_OPEN, Kind, MAILSLOT_NAME, MAX_NAME, MAX_SIZE, write_focus,
+    write_ime,
+};
 use windows::Win32::Foundation::{
     GENERIC_WRITE, HANDLE, HINSTANCE, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, OPEN_EXISTING, WriteFile,
 };
+use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::Ime::{
     IMN_SETOPENSTATUS, ImmGetContext, ImmGetOpenStatus, ImmReleaseContext,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CWPSTRUCT, CallNextHookEx, HHOOK, MSG, PM_REMOVE, SetWindowsHookExW, UnhookWindowsHookEx,
-    WH_CALLWNDPROC, WH_GETMESSAGE, WM_IME_ENDCOMPOSITION, WM_IME_NOTIFY, WM_IME_STARTCOMPOSITION,
-    WM_KEYDOWN, WM_KEYUP, WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CWPSTRUCT, CallNextHookEx, GetClassNameW, GetParent, GetWindowTextW, HHOOK, MSG, PM_REMOVE,
+    SetWindowsHookExW, UnhookWindowsHookEx, WA_INACTIVE, WH_CALLWNDPROC, WH_GETMESSAGE,
+    WM_ACTIVATE, WM_ACTIVATEAPP, WM_ENTERMENULOOP, WM_EXITMENULOOP, WM_IME_ENDCOMPOSITION,
+    WM_IME_NOTIFY, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_MOUSEACTIVATE, WM_NCACTIVATE,
+    WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 use windows::core::PCWSTR;
 
@@ -43,6 +52,10 @@ static IME_COMPOSING_STATE: AtomicBool = AtomicBool::new(false);
 static IME_KNOWN: AtomicBool = AtomicBool::new(false);
 /// デバッグ用: 送れなかった回数。
 static SEND_FAILURES: AtomicU32 = AtomicU32::new(0);
+/// このプロセスで最後に通知したフォーカス窓。
+static FOCUS_HWND: AtomicIsize = AtomicIsize::new(0);
+/// メニューを開いている（yamy は名前の列に `MENU` を足す）。
+static IN_MENU: AtomicBool = AtomicBool::new(false);
 
 /// OS が DLL を読み込むときに呼ぶ。モジュールハンドルを覚えるだけ。
 #[unsafe(no_mangle)]
@@ -132,10 +145,132 @@ fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, _lparam: LPARAM, cause_b
             refresh_open_status(hwnd, cause_base + 4, false);
         }
         WM_SETFOCUS => {
+            IN_MENU.store(false, Ordering::Relaxed);
+            notify_focus(false, cause_base + 6);
             refresh_open_status(hwnd, cause_base + 5, true);
+        }
+        WM_ACTIVATEAPP | WM_NCACTIVATE => {
+            if wparam.0 != 0 {
+                notify_focus(false, cause_base + 7);
+            }
+        }
+        WM_ACTIVATE => {
+            if (wparam.0 & 0xffff) as u32 != WA_INACTIVE {
+                notify_focus(false, cause_base + 8);
+            }
+        }
+        WM_MOUSEACTIVATE => notify_focus(false, cause_base + 9),
+        WM_ENTERMENULOOP => {
+            IN_MENU.store(true, Ordering::Relaxed);
+            notify_focus(true, cause_base + 10);
+        }
+        WM_EXITMENULOOP => {
+            IN_MENU.store(false, Ordering::Relaxed);
+            notify_focus(true, cause_base + 11);
         }
         _ => {}
     }
+}
+
+/// このスレッドのフォーカス窓が変わっていれば（`force` なら必ず）、名前の列を付けて通知する。
+fn notify_focus(force: bool, cause: u32) {
+    // SAFETY: 引数なし。呼び出しスレッドのフォーカス窓を返す。
+    let hwnd = unsafe { GetFocus() };
+    if hwnd.0.is_null() {
+        return;
+    }
+    let prev = FOCUS_HWND.swap(hwnd.0 as isize, Ordering::Relaxed);
+    if !force && prev == hwnd.0 as isize {
+        return;
+    }
+    let mut class = [0u8; MAX_NAME];
+    let mut title = [0u8; MAX_NAME];
+    let (cl, tl) = build_names(hwnd, &mut class, &mut title);
+    let h = Header {
+        kind: Kind::Focus,
+        cause,
+        // SAFETY: 引数なしの単純な API。
+        thread_id: unsafe { GetCurrentThreadId() },
+        hwnd: hwnd.0 as usize as u64,
+        flags: 0,
+    };
+    let mut buf = [0u8; MAX_SIZE];
+    let n = write_focus(&mut buf, &h, &class[..cl], &title[..tl]);
+    send(&buf[..n]);
+}
+
+/// 窓の親を根までたどる深さの上限。
+const MAX_DEPTH: usize = 32;
+
+/// クラス名の列 `exe名:クラス:…:クラス` とタイトルの列を UTF-8 で作る。戻り値は各長さ。
+/// 根（exe 名）から順に `:` で繋ぎ、最後がフォーカス窓。メニュー中は末尾に `MENU` を足す。
+fn build_names(
+    hwnd: HWND,
+    class: &mut [u8; MAX_NAME],
+    title: &mut [u8; MAX_NAME],
+) -> (usize, usize) {
+    // 親の列を集める（chain[0] = フォーカス窓）
+    let mut chain = [HWND::default(); MAX_DEPTH];
+    let mut n = 0;
+    let mut h = hwnd;
+    while !h.0.is_null() && n < MAX_DEPTH {
+        chain[n] = h;
+        n += 1;
+        // SAFETY: h は有効な窓ハンドル（無効なら NULL が返る）。
+        h = unsafe { GetParent(h) }.unwrap_or_default();
+    }
+
+    let mut cl = 0;
+    let mut tl = 0;
+    let mut wide = [0u16; 512];
+    // SAFETY: 自プロセス（None）の実行ファイル名。wide は十分な長さ。
+    let len = unsafe { GetModuleFileNameW(None, &mut wide) } as usize;
+    cl = append_utf16(class, cl, &wide[..len.min(wide.len())], false);
+    tl = append_utf16(title, tl, &wide[..len.min(wide.len())], false);
+
+    for i in (0..n).rev() {
+        let w = chain[i];
+        cl = append_utf16(class, cl, &[b':' as u16], false);
+        tl = append_utf16(title, tl, &[b':' as u16], false);
+        // SAFETY: w は有効な窓ハンドル。wide は十分な長さ。
+        let len = unsafe { GetClassNameW(w, &mut wide) } as usize;
+        cl = append_utf16(class, cl, &wide[..len.min(wide.len())], false);
+        // SAFETY: 同上。
+        let len = unsafe { GetWindowTextW(w, &mut wide) } as usize;
+        tl = append_utf16(title, tl, &wide[..len.min(wide.len())], true);
+    }
+    if IN_MENU.load(Ordering::Relaxed) {
+        cl = append_utf16(class, cl, &[b':' as u16], false);
+        tl = append_utf16(title, tl, &[b':' as u16], false);
+        let menu: [u16; 4] = [b'M' as u16, b'E' as u16, b'N' as u16, b'U' as u16];
+        cl = append_utf16(class, cl, &menu, false);
+        tl = append_utf16(title, tl, &menu, false);
+    }
+    (cl, tl)
+}
+
+/// UTF-16 を UTF-8 にして `dst[at..]` に書き足す。入り切らない文字で止める。
+/// `replace_control` なら制御文字は `?` にする（yamy と同じ）。戻り値は新しい長さ。
+fn append_utf16(
+    dst: &mut [u8; MAX_NAME],
+    mut at: usize,
+    src: &[u16],
+    replace_control: bool,
+) -> usize {
+    for c in char::decode_utf16(src.iter().copied()) {
+        let mut c = c.unwrap_or(char::REPLACEMENT_CHARACTER);
+        if replace_control && c.is_control() {
+            c = '?';
+        }
+        let mut tmp = [0u8; 4];
+        let s = c.encode_utf8(&mut tmp);
+        if at + s.len() > dst.len() {
+            break;
+        }
+        dst[at..at + s.len()].copy_from_slice(s.as_bytes());
+        at += s.len();
+    }
+    at
 }
 
 /// IME がオンかを問い直し、変わっていれば（`force` なら必ず）通知する。
@@ -164,7 +299,7 @@ fn notify_ime(hwnd: HWND, cause: u32) {
     if IME_COMPOSING_STATE.load(Ordering::Relaxed) {
         flags |= IME_COMPOSING;
     }
-    let n = Notify {
+    let h = Header {
         kind: Kind::Ime,
         cause,
         // SAFETY: 引数なしの単純な API。
@@ -172,7 +307,9 @@ fn notify_ime(hwnd: HWND, cause: u32) {
         hwnd: hwnd.0 as usize as u64,
         flags,
     };
-    send(&n.to_bytes());
+    let mut buf = [0u8; MAX_SIZE];
+    let n = write_ime(&mut buf, &h);
+    send(&buf[..n]);
 }
 
 /// メールスロットに 1 通知を書く。開いていなければ開く。失敗は数えるだけ。
