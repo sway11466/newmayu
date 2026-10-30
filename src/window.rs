@@ -6,16 +6,16 @@
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN,
-    RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RedrawWindow, ScreenToClient,
+    GetMonitorInfoW, MonitorFromWindow, RedrawWindow, ScreenToClient, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE,
 };
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetCursorPos, GetParent, GetWindowLongPtrW,
-    GetWindowRect, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic, IsWindow,
-    IsZoomed, LWA_ALPHA, MB_OK, PostMessageW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE,
-    SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
-    SetCursorPos, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, WM_SYSCOMMAND,
+    GetClientRect, GetCursorPos, GetParent, GetWindowLongPtrW, GetWindowRect, IsIconic, IsWindow,
+    IsZoomed, PostMessageW, SetCursorPos, SetLayeredWindowAttributes, SetWindowLongPtrW,
+    SetWindowPos, GWL_EXSTYLE, GWL_STYLE, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
+    LWA_ALPHA, MB_OK, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SWP_ASYNCWINDOWPOS,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, WM_SYSCOMMAND,
     WS_CHILD, WS_EX_LAYERED, WS_EX_MDICHILD, WS_EX_TOPMOST,
 };
 
@@ -337,7 +337,7 @@ impl WindowOps {
             }
             .is_err()
             {
-                eprintln!(
+                crate::log!(
                     "&WindowSetAlpha({alpha}): 失敗 (hwnd={:#x})",
                     hwnd.0 as usize
                 );
