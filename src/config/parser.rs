@@ -33,8 +33,10 @@
 //! これ以外（`event`、`def option`、`def subst`、上記以外の `&関数`、`!`/`!!`/`!!!`、R- MAX- 等の割当修飾、2 個以上のスキャンコード）は
 //! エラーにする。
 //!
-//! ファイルは BOM 無し UTF-8 のみ。大文字小文字は区別しない。
+//! ファイルの文字コードは UTF-8（BOM の有無は問わない）か CP932。UTF-8 として正しければ UTF-8、
+//! そうでなければ CP932 として読み、CP932 としても読めなければエラーにする。大文字小文字は区別しない。
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -78,6 +80,25 @@ pub fn load_str(src: &str, name: &str, dir: &Path) -> Result<Config> {
     let mut loader = Loader::new();
     loader.load_source(src, name, dir, 0)?;
     loader.finish()
+}
+
+/// ファイルのバイト列を文字列にする。UTF-8 として正しければ UTF-8（BOM は剥がす）、
+/// そうでなければ CP932 として復号する。どちらでもなければ、UTF-8 として読めなくなった行番号を返す。
+fn decode(bytes: &[u8]) -> std::result::Result<Cow<'_, str>, usize> {
+    let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let utf8_err = match std::str::from_utf8(body) {
+        Ok(s) => return Ok(Cow::Borrowed(s)),
+        Err(e) => e,
+    };
+    let (s, had_errors) = encoding_rs::SHIFT_JIS.decode_without_bom_handling(body);
+    if !had_errors {
+        return Ok(s);
+    }
+    Err(body[..utf8_err.valid_up_to()]
+        .iter()
+        .filter(|b| **b == b'\n')
+        .count()
+        + 1)
 }
 
 /// `mod NAME (=|+=|-=) KEY` の 1 項。
@@ -396,25 +417,16 @@ impl Loader {
                 return self.err(format!("開けない: {e}"));
             }
         };
-        if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-            self.file = name;
-            self.line = 1;
-            return self.err("BOM 付き UTF-8 は読めない。BOM 無しで保存してください");
-        }
-        let src = match std::str::from_utf8(&bytes) {
+        let src = match decode(&bytes) {
             Ok(s) => s,
-            Err(e) => {
+            Err(line) => {
                 self.file = name;
-                self.line = bytes[..e.valid_up_to()]
-                    .iter()
-                    .filter(|b| **b == b'\n')
-                    .count()
-                    + 1;
-                return self.err("UTF-8 として読めない。CP932 なら UTF-8 に変換してください");
+                self.line = line;
+                return self.err("文字コードが判定できない（UTF-8 でも CP932 でもない）");
             }
         };
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        self.load_source(src, &name, &dir, depth)
+        self.load_source(&src, &name, &dir, depth)
     }
 
     fn load_source(&mut self, src: &str, name: &str, dir: &Path, depth: usize) -> Result<()> {
@@ -1976,16 +1988,48 @@ keymap Sub : Global"
         let e = load(&dir.join("top.mayu")).unwrap_err();
         assert!(e.file.ends_with("inner.mayu"), "{e}");
         assert_eq!(e.line, 3);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
-        // BOM 付きはエラー
-        std::fs::write(dir.join("bom.mayu"), b"\xEF\xBB\xBFkey A = B\n").unwrap();
-        let e = load(&dir.join("bom.mayu")).unwrap_err();
-        assert!(e.message.contains("BOM"), "{e}");
-        // CP932 はエラー（行番号付き）
-        std::fs::write(dir.join("sjis.mayu"), b"# ok\n# \x93\xfa\x96\x7b\x8c\xea\n").unwrap();
-        let e = load(&dir.join("sjis.mayu")).unwrap_err();
+    #[test]
+    fn encodings() {
+        let dir = std::env::temp_dir().join(format!("newmayu-encoding-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // key 無変換 = B（無変換 = 0x7b）
+        let src = format!("{KEYS}\ndef key 無変換 = 0x7b\nkey 無変換 = B\n");
+        let muhenkan = Key::plain(0x7b);
+        let check = |name: &str, bytes: &[u8]| {
+            std::fs::write(dir.join(name), bytes).unwrap();
+            let c = load(&dir.join(name)).unwrap();
+            let a = only(global(&c), muhenkan);
+            assert!(
+                matches!(a.actions.as_slice(), [Action::Key { key, .. }] if *key == B),
+                "{name}"
+            );
+        };
+
+        // UTF-8
+        check("utf8.mayu", src.as_bytes());
+        // BOM 付き UTF-8
+        check(
+            "bom.mayu",
+            &[b"\xEF\xBB\xBF".as_slice(), src.as_bytes()].concat(),
+        );
+        // CP932（"無変換".encode("shift_jis")）
+        let mut bytes = Vec::new();
+        for (i, part) in src.split("無変換").enumerate() {
+            if i > 0 {
+                bytes.extend_from_slice(b"\x96\xb3\x95\xcf\x8a\xb7");
+            }
+            bytes.extend_from_slice(part.as_bytes());
+        }
+        check("cp932.mayu", &bytes);
+
+        // どちらでもない: エラー（UTF-8 として読めなくなった行番号付き）
+        std::fs::write(dir.join("bad.mayu"), b"# ok\n# \xfe\xff\n").unwrap();
+        let e = load(&dir.join("bad.mayu")).unwrap_err();
         assert_eq!(e.line, 2);
-        assert!(e.message.contains("UTF-8"), "{e}");
+        assert!(e.message.contains("文字コード"), "{e}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
