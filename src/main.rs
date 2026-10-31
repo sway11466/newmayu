@@ -32,9 +32,11 @@ use std::time::Duration;
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, MSG,
-    PostQuitMessage, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, MB_ICONERROR, MB_OK,
+    MSG, MessageBoxW, PostQuitMessage, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL,
 };
+use windows::core::HSTRING;
 
 use newmayu::config::parser;
 use newmayu::engine::{Engine, Input, Output};
@@ -272,25 +274,34 @@ fn engine_thread(config: Config, rx: Receiver<Event>) {
     }
 }
 
+/// 起動できないときの終わり方。ログに書き、メッセージボックスにも出す
+/// （常駐物なので、ログだけだと「何も起きない」に見える）。
+fn fatal(msg: &str) -> ExitCode {
+    log!("{msg}");
+    // SAFETY: 文字列は NUL 終端の UTF-16（HSTRING）。親窓なし。
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(msg),
+            &HSTRING::from("newmayu: 起動できない"),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+    ExitCode::FAILURE
+}
+
 fn main() -> ExitCode {
     let args = match parse_args(std::env::args().skip(1)) {
         Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return fatal(&e),
     };
     if let Err(e) = log::init(args.log.as_deref()) {
-        eprintln!("{e}");
-        return ExitCode::FAILURE;
+        return fatal(&e);
     }
     let path = args.mayu.display().to_string();
     let config = match parser::load(&args.mayu) {
         Ok(c) => c,
-        Err(e) => {
-            log!("{e}");
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return fatal(&e.to_string()),
     };
     log!(
         "{path}: キーマップ {} 個、割付 {} 件",
@@ -314,10 +325,7 @@ fn main() -> ExitCode {
     // フック DLL からの通知を受けるメールスロット。DLL を入れる前に作る
     let mailslot = match Mailslot::create() {
         Ok(m) => m,
-        Err(e) => {
-            log!("{e}");
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return fatal(&e),
     };
     let notify_tx = tx.clone();
     thread::spawn(move || {
@@ -333,20 +341,14 @@ fn main() -> ExitCode {
     // フック DLL を各プロセスに入れる
     let hook_dll = match HookDll::install() {
         Ok(h) => h,
-        Err(e) => {
-            log!("{e}");
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return fatal(&e),
     };
 
     // フック設置スレッド（= このスレッド）。メッセージループが要る。
     // SAFETY: hook_proc は WH_KEYBOARD_LL の規約どおりの関数。
     let hook = match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) } {
         Ok(h) => h,
-        Err(e) => {
-            log!("フックを掛けられない: {e}");
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return fatal(&format!("フックを掛けられない: {e}")),
     };
 
     // トレイ。メニューの操作はこのスレッド（メッセージループ）で届く。
@@ -375,10 +377,9 @@ fn main() -> ExitCode {
     ) {
         Ok(t) => t,
         Err(e) => {
-            log!("{e}");
             // SAFETY: SetWindowsHookExW が返した有効なハンドル。
             let _ = unsafe { UnhookWindowsHookEx(hook) };
-            return ExitCode::FAILURE;
+            return fatal(&e);
         }
     };
     log!("フック設置。トレイのメニューから再読込・一時停止・終了できる。");
