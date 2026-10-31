@@ -426,6 +426,9 @@ pub enum Action {
     /// `&OtherWindowClass`: いまの窓に一致する次の `window` キーマップで引き直す。
     /// 次が無ければ `&Default`。`Global` の既定動作。
     OtherWindowClass,
+    /// `&KeymapWindow`: いまの窓に一致する最初の `window` キーマップで引き直す
+    /// （`&Prefix` 先のキーマップから、窓の割付をそのまま使うとき）。
+    KeymapWindow,
     /// OS 側で実行する関数（窓の操作・マウス移動）。押したときだけ動く。
     Func(Func),
     /// `&Ignore`: 何もしない（キーを出さない）。
@@ -604,6 +607,10 @@ pub enum Func {
         wparam: u64,
         lparam: i64,
     },
+    /// `&ClipboardUpcaseWord`: クリップボードの文字列を大文字にする。
+    ClipboardUpcaseWord,
+    /// `&ClipboardDowncaseWord`: クリップボードの文字列を小文字にする。
+    ClipboardDowncaseWord,
 }
 
 impl Action {

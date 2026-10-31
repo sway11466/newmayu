@@ -4,12 +4,16 @@
 //! エンジンは OS を触らず、[`Output::Func`] に「フォーカス窓」と「何をするか」を乗せて返す。
 //! ここがそれを受け、対象の窓（最上位の窓、または MDI 子窓）を探して動かす。
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN,
     RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RedrawWindow, ScreenToClient,
 };
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+};
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetCursorPos, GetParent, GetWindowLongPtrW,
     GetWindowRect, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic, IsWindow,
@@ -216,6 +220,8 @@ impl WindowOps {
                 // SAFETY: 単純な API。
                 let _ = unsafe { MessageBeep(MB_OK) };
             }
+            Func::ClipboardUpcaseWord => clipboard_change_case(true),
+            Func::ClipboardDowncaseWord => clipboard_change_case(false),
             Func::MouseMove { dx, dy } => {
                 let mut pt = POINT::default();
                 // SAFETY: pt は有効な POINT。
@@ -510,4 +516,69 @@ fn redraw(hwnd: HWND) {
             RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN,
         )
     };
+}
+
+/// `CF_UNICODETEXT`。
+const CF_UNICODETEXT: u32 = 13;
+
+/// `&ClipboardUpcaseWord` / `&ClipboardDowncaseWord`: クリップボードの文字列の大文字小文字を変える
+/// （yamy の funcClipboardChangeCase）。文字列が入っていなければ何もしない。
+fn clipboard_change_case(upper: bool) {
+    // SAFETY: 開いたら必ず CloseClipboard する。中の関数はクリップボードを開いている間だけ呼ぶ。
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            crate::log!("クリップボードを開けない");
+            return;
+        }
+        if let Some(text) = read_clipboard_text() {
+            let text = if upper {
+                text.to_uppercase()
+            } else {
+                text.to_lowercase()
+            };
+            write_clipboard_text(&text);
+        }
+        let _ = CloseClipboard();
+    }
+}
+
+/// クリップボードを開いている間に呼ぶ。文字列が無ければ `None`。
+unsafe fn read_clipboard_text() -> Option<String> {
+    // SAFETY: 呼ぶ側がクリップボードを開いている。ハンドルは OS が持つ CF_UNICODETEXT の HGLOBAL。
+    unsafe {
+        let h = GetClipboardData(CF_UNICODETEXT).ok()?;
+        let hg = HGLOBAL(h.0);
+        let p = GlobalLock(hg) as *const u16;
+        if p.is_null() {
+            return None;
+        }
+        let mut len = 0;
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
+        let _ = GlobalUnlock(hg);
+        Some(s)
+    }
+}
+
+/// クリップボードを開いている間に呼ぶ。中身を置き換える。
+unsafe fn write_clipboard_text(s: &str) {
+    let w: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: 呼ぶ側がクリップボードを開いている。渡した HGLOBAL は SetClipboardData 後は OS のもの。
+    unsafe {
+        let Ok(hg) = GlobalAlloc(GMEM_MOVEABLE, w.len() * 2) else {
+            return;
+        };
+        let p = GlobalLock(hg) as *mut u16;
+        if p.is_null() {
+            return;
+        }
+        std::ptr::copy_nonoverlapping(w.as_ptr(), p, w.len());
+        let _ = GlobalUnlock(hg);
+        if EmptyClipboard().is_ok() && SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hg.0))).is_err()
+        {
+            crate::log!("クリップボードに書けない");
+        }
+    }
 }

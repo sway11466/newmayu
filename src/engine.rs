@@ -464,6 +464,14 @@ impl Engine {
                     });
                 }
             }
+            Action::KeymapWindow => {
+                let root = self.root();
+                let cur = Current {
+                    focus_idx: 0,
+                    ..cur
+                };
+                self.generate_keyboard_events(root, cur, edge, depth + 1)
+            }
             Action::OtherWindowClass => {
                 let next = cur.focus_idx + 1;
                 match self.focus.get(next) {
@@ -967,6 +975,31 @@ mod tests {
             e.feed(Input::up(B)),
             vec![Output::Release(RIGHT), Output::Press(H), Output::Release(H)]
         );
+    }
+
+    #[test]
+    fn keymap_window_resolves_in_the_window_keymap() {
+        let (config, mut global) = base();
+        let (none, both, any) = (ModSpec::none(), EdgeSpec::Both, LockSpec::any());
+        let sub = KeymapId(1);
+        // key A = &Prefix(Sub)   key B = X
+        global.assign(A, none, both, any, vec![Action::Prefix(sub)]);
+        global.assign(B, none, both, any, vec![Action::key(X)]);
+        // keymap Sub: key B = &KeymapWindow   key H = F
+        let mut subk = Keymap::new("Sub", None);
+        subk.assign(B, none, both, any, vec![Action::KeymapWindow]);
+        subk.assign(H, none, both, any, vec![Action::key(F)]);
+        let mut e = engine(config, vec![global, subk]);
+
+        e.feed(Input::down(A));
+        e.feed(Input::up(A));
+        // Sub の B は &KeymapWindow → 窓のキーマップ（Global）の B → X
+        assert_eq!(e.feed(Input::down(B)), vec![Output::Press(X)]);
+        assert_eq!(e.feed(Input::up(B)), vec![Output::Release(X)]);
+        e.feed(Input::down(A));
+        e.feed(Input::up(A));
+        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(F)]);
+        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(F)]);
     }
 
     #[test]

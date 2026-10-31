@@ -17,12 +17,12 @@
 //! event (prefixed|before-key-down|after-key-up) = ACTION...
 //!                                              # いまのキーマップの event。prefixed は遷移先のキーマップのものが動く
 //! key MODKEY... = ACTION...                    # ACTION = 修飾付きキー名 | $keyseq名 | ( ACTION... ) | &Prefix(KEYMAP)
-//!                                              #        | &Default | &KeymapParent | &OtherWindowClass
+//!                                              #        | &Default | &KeymapParent | &OtherWindowClass | &KeymapWindow
 //!                                              #        | &Window…([引数]) | &MouseMove(dx, dy)   （model::Func 参照）
 //!                                              #        | &Ignore | &Undefined | &VK([E-][D-|U-]名前|番号)
 //!                                              #        | &PostMessage(宛先, msg, wParam, lParam)
 //!                                              #        | &Variable(mag, inc) | &Repeat(( ACTION... ) | $keyseq名 [, 上限])
-//!                                              #        | &Sync
+//!                                              #        | &Sync | &ClipboardUpcaseWord | &ClipboardDowncaseWord
 //!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）
 //!                                              # NL- CL- SL- KL-（NumLock CapsLock ScrollLock カナ）も書ける
 //! mod MODNAME (=|+=|-=) KEY...
@@ -1036,6 +1036,10 @@ impl Loader {
                         out.push(Action::OtherWindowClass);
                         continue;
                     }
+                    if fname.eq_ignore_ascii_case("KeymapWindow") {
+                        out.push(Action::KeymapWindow);
+                        continue;
+                    }
                     if fname.eq_ignore_ascii_case("Ignore") {
                         out.push(Action::Ignore);
                         continue;
@@ -1109,7 +1113,11 @@ impl Loader {
             "windowmove" | "windowresizeto" => 3,
             "windowmoveto" => 4,
             "mousemove" => 2,
-            "windowtoggletopmost" | "windowredraw" | "undefined" => 0,
+            "windowtoggletopmost"
+            | "windowredraw"
+            | "undefined"
+            | "clipboardupcaseword"
+            | "clipboarddowncaseword" => 0,
             "postmessage" => 4,
             "windowraise"
             | "windowlower"
@@ -1167,6 +1175,8 @@ impl Loader {
             },
             "windowsetalpha" => Func::WindowSetAlpha(a.int(0)?),
             "windowredraw" => Func::WindowRedraw,
+            "clipboardupcaseword" => Func::ClipboardUpcaseWord,
+            "clipboarddowncaseword" => Func::ClipboardDowncaseWord,
             "windowresizeto" => Func::WindowResizeTo {
                 width: a.int(0)?,
                 height: a.int(1)?,
@@ -1961,6 +1971,21 @@ keymap Sub : Global"
         );
         assert!(load_err("key A = &MouseMove(1, 2").message.contains("`)`"));
         assert!(load_err("key A = &MouseMove(1,, 2)").message.contains("空"));
+    }
+
+    #[test]
+    fn keymap_window_and_clipboard_case() {
+        let c =
+            load_ok("key A = &KeymapWindow\nkey B = &ClipboardUpcaseWord &clipboarddowncaseword");
+        let g = global(&c);
+        assert_eq!(only(g, A).actions, vec![Action::KeymapWindow]);
+        assert_eq!(
+            only(g, B).actions,
+            vec![
+                Action::Func(Func::ClipboardUpcaseWord),
+                Action::Func(Func::ClipboardDowncaseWord)
+            ]
+        );
     }
 
     #[test]
