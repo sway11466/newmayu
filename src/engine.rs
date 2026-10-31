@@ -18,8 +18,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::model::{
-    Action, BasicMod, Config, Edge, EdgeSpec, Func, Key, KeymapId, LockMod, LockState, ModSpec,
-    ModState,
+    Action, BasicMod, Config, Edge, EdgeSpec, EventKind, Func, Key, KeymapId, LockMod, LockState,
+    ModSpec, ModState,
 };
 
 /// フックから届く 1 イベント。
@@ -116,6 +116,8 @@ pub struct Engine {
     locks: LockState,
     /// OS に押したと伝えてまだ離していないキー。
     win32_pressed: HashSet<Key>,
+    /// `&Variable` が変え、`&Repeat` が回数に使う値（yamy の `m_variable`）。
+    variable: i32,
     out: Vec<Output>,
 }
 
@@ -130,6 +132,7 @@ impl Engine {
             focus_hwnd: 0,
             current,
             is_prefix: false,
+            variable: 0,
             pressed: HashSet::new(),
             held: HashMap::new(),
             locks: LockState::empty(),
@@ -223,9 +226,15 @@ impl Engine {
             Edge::Down => None,
             Edge::Up => self.held.remove(&key),
         };
+        if edge == Edge::Down {
+            self.generate_event(EventKind::BeforeKeyDown, keymap_id, cur, 0);
+        }
         match held {
             Some(h) => self.generate_key_seq_events(&h.actions, Part::Up, h.keymap_id, h.cur, 0),
             None => self.generate_keyboard_events(keymap_id, cur, edge, 0),
+        }
+        if edge == Edge::Up {
+            self.generate_event(EventKind::AfterKeyUp, keymap_id, cur, 0);
         }
 
         if own_mod.is_none() {
@@ -380,6 +389,7 @@ impl Engine {
                 if edge == Edge::Down {
                     self.current = *target;
                     self.is_prefix = true;
+                    self.generate_event(EventKind::Prefixed, *target, cur, depth + 1);
                 }
             }
             Action::Default => self.generate_default(key, event_mods, edge),
@@ -388,6 +398,32 @@ impl Engine {
                 None => self.generate_default(key, event_mods, edge),
             },
             Action::Ignore => {}
+            Action::Variable { mag, inc } => {
+                if edge == Edge::Down {
+                    self.variable = self.variable.wrapping_mul(*mag).wrapping_add(*inc);
+                }
+            }
+            Action::Repeat { actions, max } => match edge {
+                // yamy の funcRepeat: 回数 - 1 回は押して離し、最後の 1 回は押したまま
+                Edge::Down => {
+                    let end = self.variable.min(*max);
+                    for _ in 1..end {
+                        self.generate_key_seq_events(actions, Part::All, keymap_id, cur, depth + 1);
+                    }
+                    if end > 0 {
+                        self.generate_key_seq_events(
+                            actions,
+                            Part::Down,
+                            keymap_id,
+                            cur,
+                            depth + 1,
+                        );
+                    }
+                }
+                Edge::Up => {
+                    self.generate_key_seq_events(actions, Part::Up, keymap_id, cur, depth + 1);
+                }
+            },
             Action::Vk {
                 vk,
                 extended,
@@ -430,6 +466,15 @@ impl Engine {
         }
     }
 
+    /// `event` の動作列を全部押して離す（yamy の `generateEvents`）。そのキーマップだけを見る。
+    fn generate_event(&mut self, kind: EventKind, keymap_id: KeymapId, cur: Current, depth: usize) {
+        let Some(actions) = self.config.keymap(keymap_id).event(kind) else {
+            return;
+        };
+        let actions = actions.to_vec();
+        self.generate_key_seq_events(&actions, Part::All, keymap_id, cur, depth);
+    }
+
     /// 出力キーに必要な修飾を OS 側で揃える。dontcare の修飾は触らない。
     fn generate_modifier_events(&mut self, mods: ModSpec) {
         for m in BasicMod::ALL {
@@ -469,7 +514,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Action, Keymap, LockSpec, WindowMatch, WindowOp};
+    use crate::model::{Action, EventKind, Keymap, LockSpec, WindowMatch, WindowOp};
 
     // 109.mayu のスキャンコード
     const A: Key = Key::plain(0x1e);
@@ -806,6 +851,108 @@ mod tests {
         assert_eq!(e.feed(Input::down(H)), vec![Output::Press(H)]);
         e.feed(Input::up(H));
         assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+    }
+
+    #[test]
+    fn variable_counts_repeat() {
+        let (config, mut global) = base();
+        let (none, both, any) = (ModSpec::none(), EdgeSpec::Both, LockSpec::any());
+        // key A = &Variable(10, 3)
+        global.assign(
+            A,
+            none,
+            both,
+            any,
+            vec![Action::Variable { mag: 10, inc: 3 }],
+        );
+        // key B = &Repeat((X), 100)
+        global.assign(
+            B,
+            none,
+            both,
+            any,
+            vec![Action::Repeat {
+                actions: vec![Action::key(X)],
+                max: 100,
+            }],
+        );
+        // key H = &Repeat((X), 2)
+        global.assign(
+            H,
+            none,
+            both,
+            any,
+            vec![Action::Repeat {
+                actions: vec![Action::key(X)],
+                max: 2,
+            }],
+        );
+        let mut e = engine(config, vec![global]);
+
+        // 変数が 0 のうちは何も出ない
+        assert_eq!(e.feed(Input::down(B)), vec![]);
+        assert_eq!(e.feed(Input::up(B)), vec![]);
+
+        e.feed(Input::down(A));
+        e.feed(Input::up(A));
+        assert_eq!(e.variable, 3);
+        // 3 回。最後の 1 回は押したまま、離しで離す
+        assert_eq!(
+            e.feed(Input::down(B)),
+            vec![
+                Output::Press(X),
+                Output::Release(X),
+                Output::Press(X),
+                Output::Release(X),
+                Output::Press(X)
+            ]
+        );
+        assert_eq!(e.feed(Input::up(B)), vec![Output::Release(X)]);
+        // 上限 2
+        assert_eq!(
+            e.feed(Input::down(H)),
+            vec![Output::Press(X), Output::Release(X), Output::Press(X)]
+        );
+        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(X)]);
+    }
+
+    #[test]
+    fn events_fire_around_keys_and_on_prefix() {
+        let (config, mut global) = base();
+        let (none, both, any) = (ModSpec::none(), EdgeSpec::Both, LockSpec::any());
+        let sub = KeymapId(1);
+        global.set_event(EventKind::BeforeKeyDown, vec![Action::key(X)]);
+        global.set_event(EventKind::AfterKeyUp, vec![Action::key(H)]);
+        // key A = &Prefix(Sub)
+        global.assign(A, none, both, any, vec![Action::Prefix(sub)]);
+        let mut subk = Keymap::new("Sub", Some(GLOBAL));
+        subk.set_event(EventKind::Prefixed, vec![Action::key(F)]);
+        // keymap Sub: key B = Right
+        subk.assign(B, none, both, any, vec![Action::key(RIGHT)]);
+        let mut e = engine(config, vec![global, subk]);
+
+        // A 押し: Global の before-key-down → &Prefix → Sub の prefixed
+        assert_eq!(
+            e.feed(Input::down(A)),
+            vec![
+                Output::Press(X),
+                Output::Release(X),
+                Output::Press(F),
+                Output::Release(F)
+            ]
+        );
+        // A 離し: 離しは Global で引くので Global の after-key-up
+        assert_eq!(
+            e.feed(Input::up(A)),
+            vec![Output::Press(H), Output::Release(H)]
+        );
+        // 次の B は Sub で引く。Sub に before-key-down は無い
+        assert_eq!(e.feed(Input::down(B)), vec![Output::Press(RIGHT)]);
+        // B 離しは Global に戻っているので Global の after-key-up
+        assert_eq!(
+            e.feed(Input::up(B)),
+            vec![Output::Release(RIGHT), Output::Press(H), Output::Release(H)]
+        );
     }
 
     #[test]

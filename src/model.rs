@@ -439,6 +439,50 @@ pub enum Action {
         down: bool,
         up: bool,
     },
+    /// `&Variable(mag, inc)`: エンジンの変数を `変数 * mag + inc` にする。押したときだけ。
+    /// `&Repeat` の回数になる（emacsedit.mayu の C-u 数字）。
+    Variable { mag: i32, inc: i32 },
+    /// `&Repeat(( 動作… ) [, 上限])`: 動作列を変数の値の回数（上限まで）くり返す。
+    /// 押したときは最後の 1 回だけ押したままにし、離したときにそれを離す。上限の既定は 10。
+    Repeat { actions: Vec<Action>, max: i32 },
+}
+
+/// `event 名 = 動作…` の名前。yamy の `Event`。キーマップごとに持つ。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    /// `prefixed`: `&Prefix` で遷移した直後。遷移先のキーマップのものが動く。
+    Prefixed,
+    /// `before-key-down`: 物理キーを押したとき、その割付の前。
+    BeforeKeyDown,
+    /// `after-key-up`: 物理キーを離したとき、その割付の後。
+    AfterKeyUp,
+}
+
+impl EventKind {
+    pub const ALL: [EventKind; 3] = [
+        EventKind::Prefixed,
+        EventKind::BeforeKeyDown,
+        EventKind::AfterKeyUp,
+    ];
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// `.mayu` に書く名前（大文字小文字は区別しない）。
+    pub fn by_name(name: &str) -> Option<EventKind> {
+        EventKind::ALL
+            .into_iter()
+            .find(|k| k.name().eq_ignore_ascii_case(name))
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            EventKind::Prefixed => "prefixed",
+            EventKind::BeforeKeyDown => "before-key-down",
+            EventKind::AfterKeyUp => "after-key-up",
+        }
+    }
 }
 
 /// `&PostMessage` の宛先（yamy の `ToWindowType`）。フォーカス窓から見た相対。
@@ -602,6 +646,8 @@ pub struct Keymap {
     pub default_actions: Vec<Action>,
     pub mod_keys: [Vec<Key>; BasicMod::ALL.len()],
     pub assignments: Vec<Assignment>,
+    /// `event 名 = 動作…`。
+    pub events: [Option<Vec<Action>>; EventKind::ALL.len()],
 }
 
 impl Keymap {
@@ -614,6 +660,7 @@ impl Keymap {
             default_actions: vec![Action::KeymapParent],
             mod_keys: Default::default(),
             assignments: Vec::new(),
+            events: Default::default(),
         }
     }
 
@@ -664,6 +711,15 @@ impl Keymap {
                 actions,
             },
         );
+    }
+
+    /// `event 名 = 動作…`。同じ名前は置き換える。
+    pub fn set_event(&mut self, kind: EventKind, actions: Vec<Action>) {
+        self.events[kind.index()] = Some(actions);
+    }
+
+    pub fn event(&self, kind: EventKind) -> Option<&[Action]> {
+        self.events[kind.index()].as_deref()
     }
 
     /// このキーが修飾キーとして登録されていれば、その修飾を返す。

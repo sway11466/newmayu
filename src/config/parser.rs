@@ -14,11 +14,14 @@
 //! keymap2 NAME [: PARENT] [= ACTION...]       # keymap と同じ（yamy でも同じ）
 //! window NAME [WINDOW] [: PARENT] [= ACTION...]
 //!                                              # WINDOW = /クラス/ | ( /クラス/ && /タイトル/ ) | ( /クラス/ || /タイトル/ )
+//! event (prefixed|before-key-down|after-key-up) = ACTION...
+//!                                              # いまのキーマップの event。prefixed は遷移先のキーマップのものが動く
 //! key MODKEY... = ACTION...                    # ACTION = 修飾付きキー名 | $keyseq名 | ( ACTION... ) | &Prefix(KEYMAP)
 //!                                              #        | &Default | &KeymapParent | &OtherWindowClass
 //!                                              #        | &Window…([引数]) | &MouseMove(dx, dy)   （model::Func 参照）
 //!                                              #        | &Ignore | &Undefined | &VK([E-][D-|U-]名前|番号)
 //!                                              #        | &PostMessage(宛先, msg, wParam, lParam)
+//!                                              #        | &Variable(mag, inc) | &Repeat(( ACTION... ) | $keyseq名 [, 上限])
 //!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）
 //!                                              # NL- CL- SL- KL-（NumLock CapsLock ScrollLock カナ）も書ける
 //! mod MODNAME (=|+=|-=) KEY...
@@ -30,7 +33,7 @@
 //! `U-` `D-` は押し・離しの区別（両方または無指定なら両方）。
 //! 未指定の `IC-` は「変換中でない」を要求し（yamy の既定）、`IL-` は dontcare。
 //!
-//! これ以外（`event`、`def option`、`def subst`、上記以外の `&関数`、`!`/`!!`/`!!!`、R- MAX- 等の割当修飾、2 個以上のスキャンコード）は
+//! これ以外（`def option`、`def subst`、上記以外の `&関数`、`!`/`!!`/`!!!`、R- MAX- 等の割当修飾、2 個以上のスキャンコード）は
 //! エラーにする。
 //!
 //! ファイルの文字コードは UTF-8（BOM の有無は問わない）か CP932。UTF-8 として正しければ UTF-8、
@@ -44,8 +47,8 @@ use std::path::{Path, PathBuf};
 use super::lexer::{Line, Token, tokenize};
 use super::vkeys::vk_by_name;
 use crate::model::{
-    Action, BasicMod, Config, EdgeSpec, Func, Gravity, Key, Keymap, KeymapId, LockMod, LockSpec,
-    ModSpec, ScanPrefix, Target, ToWindow, WindowMatch, WindowOp,
+    Action, BasicMod, Config, EdgeSpec, EventKind, Func, Gravity, Key, Keymap, KeymapId, LockMod,
+    LockSpec, ModSpec, ScanPrefix, Target, ToWindow, WindowMatch, WindowOp,
 };
 
 /// 最大の include 深さ。循環 include もこれで止まる。
@@ -493,7 +496,7 @@ impl Loader {
             "key" => self.load_key(cur),
             "mod" => self.load_mod(cur),
             "keyseq" => self.load_keyseq(cur),
-            "event" => self.err(format!("`{head}` は未対応")),
+            "event" => self.load_event(cur),
             _ => self.err(format!("知らない文 `{head}`")),
         }
     }
@@ -840,6 +843,56 @@ impl Loader {
         }
     }
 
+    /// `event NAME = ACTION...`。いまのキーマップに付く。
+    fn load_event(&mut self, cur: &mut Cur) -> Result<()> {
+        let Some(t) = cur.next() else {
+            return self.err("event の後は prefixed / before-key-down / after-key-up");
+        };
+        let name = self.name_of(t)?;
+        let Some(kind) = EventKind::by_name(&name) else {
+            return self.err(format!(
+                "知らない event `{name}`（prefixed / before-key-down / after-key-up）"
+            ));
+        };
+        self.expect_sym(cur, "=")?;
+        let actions = self.load_actions(cur, false)?;
+        self.keymaps[self.current].keymap.set_event(kind, actions);
+        Ok(())
+    }
+
+    /// `&Repeat(( ACTION... ) | $keyseq名 [, 上限])`。上限の既定は 10（yamy と同じ）。
+    fn load_repeat(&mut self, cur: &mut Cur) -> Result<Action> {
+        self.expect_sym(cur, "(")?;
+        let actions = match cur.next() {
+            Some(Token::Sym("(")) => self.load_actions(cur, true)?,
+            Some(Token::Sym("$")) => {
+                let Some(t) = cur.next() else {
+                    return self.err("`$` の後は keyseq 名");
+                };
+                let name = self.name_of(t)?;
+                match self.keyseqs.get(&lower(&name)) {
+                    Some(seq) => seq.clone(),
+                    None => return self.err(format!("keyseq `${name}` は未定義")),
+                }
+            }
+            _ => return self.err("&Repeat の 1 番目の引数は `( 動作… )` か `$keyseq名`"),
+        };
+        let max = if cur.peek_sym(",") {
+            cur.next();
+            match cur.next() {
+                Some(Token::Number(v, _)) => match i32::try_from(*v) {
+                    Ok(v) => v,
+                    Err(_) => return self.err("&Repeat: 上限が大きすぎる"),
+                },
+                _ => return self.err("&Repeat の 2 番目の引数は数（上限）"),
+            }
+        } else {
+            10
+        };
+        self.expect_sym(cur, ")")?;
+        Ok(Action::Repeat { actions, max })
+    }
+
     /// `key MODKEY... = ACTION...`
     fn load_key(&mut self, cur: &mut Cur) -> Result<()> {
         let mut lhs = Vec::new();
@@ -986,6 +1039,24 @@ impl Loader {
                     }
                     if fname.eq_ignore_ascii_case("VK") {
                         out.push(self.load_vk(cur)?);
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("Variable") {
+                        let args = self.load_args(cur)?;
+                        let a = Args {
+                            fname: &fname,
+                            args: &args,
+                            loader: self,
+                        };
+                        a.no_more(2)?;
+                        out.push(Action::Variable {
+                            mag: a.int(0)?,
+                            inc: a.int(1)?,
+                        });
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("Repeat") {
+                        out.push(self.load_repeat(cur)?);
                         continue;
                     }
                     if let Some(f) = self.load_func(&fname, cur)? {
@@ -1885,6 +1956,69 @@ keymap Sub : Global"
     }
 
     #[test]
+    fn event_variable_and_repeat() {
+        let c = load_ok(
+            "keyseq $seq = Space
+             keymap Sub
+             event prefixed = H
+             event Before-Key-Down = B
+             key A = &Variable(10, 3) &Prefix(Sub)
+             key B = &Repeat((H), 100) &Variable(0, 0)
+             key H = &Repeat($seq)",
+        );
+        let sub = &c.keymaps[1];
+        assert_eq!(
+            sub.event(EventKind::Prefixed),
+            Some(&[Action::key_with(H, base())][..])
+        );
+        assert_eq!(
+            sub.event(EventKind::BeforeKeyDown),
+            Some(&[Action::key_with(B, base())][..])
+        );
+        assert_eq!(sub.event(EventKind::AfterKeyUp), None);
+        assert_eq!(global(&c).event(EventKind::Prefixed), None);
+        assert_eq!(
+            only(sub, A).actions,
+            vec![
+                Action::Variable { mag: 10, inc: 3 },
+                Action::Prefix(KeymapId(1))
+            ]
+        );
+        assert_eq!(
+            only(sub, B).actions,
+            vec![
+                Action::Repeat {
+                    actions: vec![Action::key_with(H, base())],
+                    max: 100
+                },
+                Action::Variable { mag: 0, inc: 0 }
+            ]
+        );
+        assert_eq!(
+            only(sub, H).actions,
+            vec![Action::Repeat {
+                actions: vec![Action::key_with(SPACE, base())],
+                max: 10
+            }]
+        );
+        assert!(
+            load_err("event foo = A")
+                .to_string()
+                .contains("知らない event")
+        );
+        assert!(
+            load_err("key A = &Repeat(A)")
+                .to_string()
+                .contains("&Repeat の 1 番目")
+        );
+        assert!(
+            load_err("key A = &Variable(1)")
+                .to_string()
+                .contains("&Variable")
+        );
+    }
+
+    #[test]
     fn vk_and_post_message() {
         let c = load_ok(
             "key A = &VK(RButton)
@@ -2051,7 +2185,6 @@ keymap Sub : Global"
         assert!(load_err("key A = $Nothing").message.contains("未定義"));
         assert!(load_err("keymap X : Nowhere").message.contains("未定義"));
         assert!(load_err("def key A = 0x01").message.contains("定義済み"));
-        assert!(load_err("event prefixed = A").message.contains("未対応"));
         assert!(load_err("key C- = B").message.contains("未対応"));
     }
 }
