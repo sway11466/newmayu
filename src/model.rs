@@ -445,6 +445,9 @@ pub enum Action {
     /// `&Repeat(( 動作… ) [, 上限])`: 動作列を変数の値の回数（上限まで）くり返す。
     /// 押したときは最後の 1 回だけ押したままにし、離したときにそれを離す。上限の既定は 10。
     Repeat { actions: Vec<Action>, max: i32 },
+    /// `&Sync`: ここまでに出したキーがフォーカス窓で処理されるのを待つ。押したときだけ。
+    /// コンソール窓では待たない（yamy と同じ）。
+    Sync,
 }
 
 /// `event 名 = 動作…` の名前。yamy の `Event`。キーマップごとに持つ。
@@ -751,6 +754,8 @@ pub struct Config {
     /// `def mod Control = LControl RControl`。出力側で修飾を押す／離すときに使う物理キー。
     /// Shift / Alt / Control / Windows のみ。Mod0〜9 は出力されない。
     pub def_mods: [Vec<Key>; BasicMod::ALL.len()],
+    /// `def sync = SCANCODE`。`&Sync` で出す同期キー。無ければ `&Sync` は何もしない。
+    pub sync: Option<Key>,
 }
 
 impl Config {
@@ -758,6 +763,7 @@ impl Config {
         Config {
             keymaps,
             def_mods: Default::default(),
+            sync: None,
         }
     }
 

@@ -2,8 +2,9 @@
 //!
 //! 本体が `newmayu_hook_install` を呼ぶと、`WH_GETMESSAGE` と `WH_CALLWNDPROC` を全スレッド対象で
 //! 掛ける。OS がこの DLL を各 GUI プロセスに読み込み、そのプロセスの窓メッセージがここを通る。
-//! ここで IME の状態（オン・変換中）の変化と、フォーカスの移動を見つけ、本体のメールスロットに
-//! 通知を書く。フォーカスの通知には、フォーカス窓から親をたどったクラス名の列
+//! ここで IME の状態（オン・変換中）の変化と、フォーカスの移動、`&Sync` の同期キーの到着を見つけ、
+//! 本体のメールスロットに通知を書く。同期キーのスキャンコードは本体が共有メモリ
+//! （`SYNC_SHARE_NAME`）に置き、最初のキー離しで読む。フォーカスの通知には、フォーカス窓から親をたどったクラス名の列
 //! （`exe名:クラス:…:クラス`）とタイトルの列を載せる（yamy の `getClassNameTitleName`）。
 //!
 //! 他プロセスの中で動くので、やることを最小にする:
@@ -15,7 +16,8 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use newmayu_ipc::{
     CAPS_LOCK, Header, IME_COMPOSING, IME_OPEN, KANA_LOCK, Kind, MAILSLOT_NAME, MAX_NAME, MAX_SIZE,
-    NUM_LOCK, SCROLL_LOCK, write_focus, write_lock,
+    NUM_LOCK, SCROLL_LOCK, SYNC_SHARE_NAME, SYNC_SHARE_SIZE, read_sync_share, write_focus,
+    write_lock,
 };
 use windows::Win32::Foundation::{
     GENERIC_WRITE, HANDLE, HINSTANCE, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM,
@@ -24,6 +26,7 @@ use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, OPEN_EXISTING, WriteFile,
 };
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
+use windows::Win32::System::Memory::{FILE_MAP_READ, MapViewOfFile, OpenFileMappingW};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::Ime::{
     IMN_SETOPENSTATUS, ImmGetContext, ImmGetOpenStatus, ImmReleaseContext,
@@ -58,6 +61,8 @@ static SEND_FAILURES: AtomicU32 = AtomicU32::new(0);
 static FOCUS_HWND: AtomicIsize = AtomicIsize::new(0);
 /// メニューを開いている（yamy は名前の列に `MENU` を足す）。
 static IN_MENU: AtomicBool = AtomicBool::new(false);
+/// 同期キーの共有メモリを写したアドレス。0 = まだ開いていない、-1 = 開けなかった。
+static SYNC_VIEW: AtomicIsize = AtomicIsize::new(0);
 
 /// OS が DLL を読み込むときに呼ぶ。モジュールハンドルを覚えるだけ。
 #[unsafe(no_mangle)]
@@ -130,7 +135,7 @@ unsafe extern "system" fn call_wnd_proc(code: i32, wparam: WPARAM, lparam: LPARA
 }
 
 /// 両フック共通。`cause_base` は通知のデバッグ番号の下駄（0 = GetMessage、10 = CallWndProc）。
-fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, _lparam: LPARAM, cause_base: u32) {
+fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, cause_base: u32) {
     match message {
         WM_IME_STARTCOMPOSITION => {
             IME_COMPOSING_STATE.store(true, Ordering::Relaxed);
@@ -149,6 +154,9 @@ fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, _lparam: LPARAM, cause_b
                 .iter()
                 .any(|k| k.0 == vk);
             refresh_open_status(hwnd, cause_base + 4, is_lock_key);
+            if message == WM_KEYUP || message == WM_SYSKEYUP {
+                check_sync(hwnd, lparam, cause_base + 12);
+            }
         }
         WM_SETFOCUS => {
             IN_MENU.store(false, Ordering::Relaxed);
@@ -328,6 +336,64 @@ fn notify_ime(hwnd: HWND, cause: u32) {
     let mut buf = [0u8; MAX_SIZE];
     let n = write_lock(&mut buf, &h);
     send(&buf[..n]);
+}
+
+/// キー離しが同期キーなら本体に知らせる（yamy の `notifySync`）。
+/// `lparam` のビット 16〜23 がスキャンコード、ビット 24 が拡張キー。
+fn check_sync(hwnd: HWND, lparam: LPARAM, cause: u32) {
+    let Some((scan, extended)) = sync_key() else {
+        return;
+    };
+    let l = lparam.0 as u32;
+    if (l >> 16) & 0xff != scan || ((l >> 24) & 1 != 0) != extended {
+        return;
+    }
+    let h = Header {
+        kind: Kind::Sync,
+        cause,
+        // SAFETY: 引数なし。
+        thread_id: unsafe { GetCurrentThreadId() },
+        hwnd: hwnd.0 as usize as u64,
+        flags: 0,
+    };
+    let mut buf = [0u8; MAX_SIZE];
+    let n = write_lock(&mut buf, &h);
+    send(&buf[..n]);
+}
+
+/// 共有メモリにある同期キー。無ければ `None`。
+fn sync_key() -> Option<(u32, bool)> {
+    let mut v = SYNC_VIEW.load(Ordering::Relaxed);
+    if v == 0 {
+        v = open_sync_share();
+        SYNC_VIEW.store(v, Ordering::Relaxed);
+    }
+    if v <= 0 {
+        return None;
+    }
+    // SAFETY: v は MapViewOfFile が返した SYNC_SHARE_SIZE バイト以上の読める領域。本体が書き換えるのは
+    // u32 単位で、読む側は古い値か新しい値のどちらかを見る。
+    let b = unsafe { &*(v as *const [u8; SYNC_SHARE_SIZE]) };
+    let (scan, extended) = read_sync_share(b);
+    (scan != 0).then_some((scan, extended))
+}
+
+/// 本体の共有メモリを開いて写す。開けなければ -1。写しはプロセスが終わるまで持つ。
+fn open_sync_share() -> isize {
+    let mut name: [u16; 64] = [0; 64];
+    for (i, u) in SYNC_SHARE_NAME.encode_utf16().enumerate() {
+        name[i] = u;
+    }
+    // SAFETY: name は NUL 終端の UTF-16。
+    let Ok(h) = (unsafe { OpenFileMappingW(FILE_MAP_READ.0, false, PCWSTR(name.as_ptr())) }) else {
+        return -1;
+    };
+    // SAFETY: h は有効なファイルマッピング。
+    let view = unsafe { MapViewOfFile(h, FILE_MAP_READ, 0, 0, SYNC_SHARE_SIZE) };
+    if view.Value.is_null() {
+        return -1;
+    }
+    view.Value as isize
 }
 
 /// メールスロットに 1 通知を書く。開いていなければ開く。失敗は数えるだけ。

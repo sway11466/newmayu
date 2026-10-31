@@ -60,6 +60,9 @@ pub enum Output {
         extended: bool,
         up: bool,
     },
+    /// `&Sync`: ここまでの出力がフォーカス窓で処理されるまで、以後の出力を待たせる。
+    /// 実際に待つのは本体側（同期キーを出し、フック DLL からの通知を待つ）。
+    Sync,
 }
 
 /// キーマップ木の探索が戻らないときの上限（yamy と同じ 64）。
@@ -104,6 +107,8 @@ pub struct Engine {
     focus: Vec<KeymapId>,
     /// フォーカスを持つ窓。同じ窓の通知を繰り返し受けても引き直さないために覚える。
     focus_hwnd: u64,
+    /// フォーカス窓がコンソール（`ConsoleWindowClass`）。`&Sync` を出さない。
+    focus_is_console: bool,
     /// いまキーを解決するキーマップ。通常は `focus` の先頭、`&Prefix` 後は遷移先。
     current: KeymapId,
     /// `&Prefix` を受けて次の 1 キーを待っている。
@@ -130,6 +135,7 @@ impl Engine {
             config,
             focus,
             focus_hwnd: 0,
+            focus_is_console: false,
             current,
             is_prefix: false,
             variable: 0,
@@ -159,6 +165,9 @@ impl Engine {
     /// フォーカスが移った。`class` `title` はフック DLL が作る列（`model::WindowMatch` 参照）。
     /// 一致する `window` キーマップを引き直し、`&Prefix` の途中なら捨てる。
     pub fn set_focus(&mut self, hwnd: u64, class: &str, title: &str) {
+        self.focus_is_console = class
+            .split(':')
+            .any(|c| c.eq_ignore_ascii_case("ConsoleWindowClass"));
         let focus = self.config.focus_keymaps(class, title);
         if hwnd == self.focus_hwnd && focus == self.focus {
             return;
@@ -398,6 +407,11 @@ impl Engine {
                 None => self.generate_default(key, event_mods, edge),
             },
             Action::Ignore => {}
+            Action::Sync => {
+                if edge == Edge::Down && !self.focus_is_console {
+                    self.out.push(Output::Sync);
+                }
+            }
             Action::Variable { mag, inc } => {
                 if edge == Edge::Down {
                     self.variable = self.variable.wrapping_mul(*mag).wrapping_add(*inc);
@@ -953,6 +967,27 @@ mod tests {
             e.feed(Input::up(B)),
             vec![Output::Release(RIGHT), Output::Press(H), Output::Release(H)]
         );
+    }
+
+    #[test]
+    fn sync_is_output_on_press_except_in_console() {
+        let (config, mut global) = base();
+        // key A = &Sync B
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::Sync, Action::key(B)],
+        );
+        let mut e = engine(config, vec![global]);
+        e.set_focus(1, "x.exe:Edit", "");
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Sync, Output::Press(B)]);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+        // コンソールでは待たない
+        e.set_focus(2, "conhost.exe:ConsoleWindowClass", "");
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
     }
 
     #[test]

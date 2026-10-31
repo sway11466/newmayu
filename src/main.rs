@@ -21,14 +21,14 @@
 //! - 「終了」: メッセージループを抜け、フックを外し、エンジンが押したままにしている
 //!   キーを離し、フック DLL とアイコンを外して終わる
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -42,7 +42,7 @@ use newmayu::config::parser;
 use newmayu::engine::{Engine, Input, Output};
 use newmayu::log;
 use newmayu::model::{Config, Key, LockMod};
-use newmayu::notify::{HookDll, Mailslot};
+use newmayu::notify::{HookDll, Mailslot, SyncShare};
 use newmayu::platform;
 use newmayu::ui::{Command, Tray};
 use newmayu::window::WindowOps;
@@ -52,6 +52,8 @@ use newmayu_ipc::{
 
 /// 終了時、エンジンスレッドが押下中のキーを離し終えるのを待つ上限。
 const QUIT_WAIT: Duration = Duration::from_secs(2);
+/// `&Sync` で同期キーの通知を待つ上限（yamy と同じ 5 秒）。
+const SYNC_WAIT: Duration = Duration::from_secs(5);
 
 /// エンジンスレッドに届くもの。
 enum Event {
@@ -173,7 +175,7 @@ impl Pressed {
                         self.vks.insert((vk, extended));
                     }
                 }
-                Output::Func { .. } => {}
+                Output::Func { .. } | Output::Sync => {}
             }
         }
     }
@@ -190,12 +192,50 @@ impl Pressed {
     }
 }
 
+/// `&Sync`: 同期キーを出し、フォーカス窓のスレッドがそれを取り出した通知を待つ（yamy の funcSync）。
+/// 待っている間に届いた他のイベントは `pending` に積み、後で処理する。
+fn wait_sync(sync: Option<Key>, rx: &Receiver<Event>, pending: &mut VecDeque<Event>) {
+    let Some(key) = sync else {
+        log!("&Sync: def sync が無いので待たない");
+        return;
+    };
+    platform::send(&[Output::Release(key)]);
+    let deadline = Instant::now() + SYNC_WAIT;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match rx.recv_timeout(deadline - now) {
+            Ok(Event::Notify(n)) if n.header.kind == Kind::Sync => {
+                log!(
+                    "&Sync: 届いた (thread={} hwnd={:#x})",
+                    n.header.thread_id,
+                    n.header.hwnd
+                );
+                return;
+            }
+            Ok(ev) => pending.push_back(ev),
+            Err(_) => break,
+        }
+    }
+    log!("&Sync: {SYNC_WAIT:?} 待っても届かなかった");
+}
+
 /// エンジンスレッドの本体。`Quit` で押下中のキーを離して抜ける。
-fn engine_thread(config: Config, rx: Receiver<Event>) {
+fn engine_thread(config: Config, rx: Receiver<Event>, sync_share: SyncShare) {
     let mut engine = Engine::new(config);
     let mut window_ops = WindowOps::new();
     let mut pressed = Pressed::default();
-    for ev in rx {
+    let mut pending: VecDeque<Event> = VecDeque::new();
+    loop {
+        let ev = match pending.pop_front() {
+            Some(ev) => ev,
+            None => match rx.recv() {
+                Ok(ev) => ev,
+                Err(_) => break,
+            },
+        };
         match ev {
             Event::Reload(config) => {
                 // 前のエンジンが押したままのキーは離してから作り直す
@@ -205,6 +245,7 @@ fn engine_thread(config: Config, rx: Receiver<Event>) {
                     platform::send(&releases);
                 }
                 pressed = Pressed::default();
+                sync_share.set(config.sync);
                 engine = Engine::new(*config);
                 log!("再読込: エンジンを作り直した");
             }
@@ -212,8 +253,18 @@ fn engine_thread(config: Config, rx: Receiver<Event>) {
                 let outputs = engine.feed(input);
                 log!("{input:?} -> {outputs:?}");
                 pressed.track(&outputs);
-                platform::send(&outputs);
-                window_ops.run(&outputs);
+                // &Sync の所で区切り、区切りごとに出してから待つ
+                for seg in outputs.split_inclusive(|o| *o == Output::Sync) {
+                    let (body, sync) = match seg.split_last() {
+                        Some((Output::Sync, body)) => (body, true),
+                        _ => (seg, false),
+                    };
+                    platform::send(body);
+                    window_ops.run(body);
+                    if sync {
+                        wait_sync(engine.config().sync, &rx, &mut pending);
+                    }
+                }
             }
             Event::Notify(n) => {
                 let h = n.header;
@@ -242,6 +293,12 @@ fn engine_thread(config: Config, rx: Receiver<Event>) {
                             engine.set_lock(m, h.lock(flag));
                         }
                     }
+                    Kind::Sync => log!(
+                        "同期キーが届いた（待っていない） (thread={} hwnd={:#x} cause={})",
+                        h.thread_id,
+                        h.hwnd,
+                        h.cause
+                    ),
                     Kind::Focus => {
                         engine.set_focus(h.hwnd, &n.class, &n.title);
                         let names: Vec<&str> = engine
@@ -336,7 +393,12 @@ fn main() -> ExitCode {
         }
     });
 
-    thread::spawn(move || engine_thread(config, rx));
+    // &Sync の同期キーを DLL に知らせる共有メモリ。DLL を入れる前に作る
+    let sync_share = match SyncShare::create(config.sync) {
+        Ok(s) => s,
+        Err(e) => return fatal(&e),
+    };
+    thread::spawn(move || engine_thread(config, rx, sync_share));
 
     // フック DLL を各プロセスに入れる
     let hook_dll = match HookDll::install() {

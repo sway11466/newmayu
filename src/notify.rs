@@ -2,16 +2,25 @@
 //!
 //! - `HookDll`: 本体の隣にある `newmayu_hook.dll` を読み込み、フックを掛ける・外す
 //! - `Mailslot`: DLL が通知を書き込むメールスロット。本体が作り、読み取りスレッドで読む
+//! - `SyncShare`: `&Sync` の同期キー（`def sync`）を DLL に知らせる共有メモリ
 //!
 //! 通知の形は `newmayu_ipc::Notify`。
 
 use std::path::PathBuf;
 
-use newmayu_ipc::{MAILSLOT_NAME, MAX_SIZE, Notify};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE};
+use newmayu_ipc::{
+    MAILSLOT_NAME, MAX_SIZE, Notify, SYNC_SHARE_NAME, SYNC_SHARE_SIZE, write_sync_share,
+};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::ReadFile;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Mailslots::CreateMailslotW;
+use windows::Win32::System::Memory::{
+    CreateFileMappingW, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READWRITE,
+    UnmapViewOfFile,
+};
+
+use crate::model::{Key, ScanPrefix};
 use windows::core::{HSTRING, PCSTR};
 
 const DLL_FILE: &str = "newmayu_hook.dll";
@@ -108,3 +117,59 @@ impl Drop for Mailslot {
 
 // HANDLE を別スレッドで読むため。ハンドルはプロセス内で共有できる。
 unsafe impl Send for Mailslot {}
+
+/// `&Sync` の同期キーを DLL に知らせる共有メモリ。本体が作り、`def sync` の値を書く。
+pub struct SyncShare {
+    handle: HANDLE,
+    view: MEMORY_MAPPED_VIEW_ADDRESS,
+}
+
+impl SyncShare {
+    pub fn create(key: Option<Key>) -> Result<SyncShare, String> {
+        // SAFETY: 名前は NUL 終端の UTF-16。ページングファイルに取る小さな領域。
+        let handle = unsafe {
+            CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                None,
+                PAGE_READWRITE,
+                0,
+                SYNC_SHARE_SIZE as u32,
+                &HSTRING::from(SYNC_SHARE_NAME),
+            )
+        }
+        .map_err(|e| format!("同期キーの共有メモリを作れない: {e}"))?;
+        // SAFETY: handle は有効なファイルマッピング。
+        let view = unsafe { MapViewOfFile(handle, FILE_MAP_WRITE, 0, 0, SYNC_SHARE_SIZE) };
+        if view.Value.is_null() {
+            // SAFETY: 直前に作った有効なハンドル。
+            let _ = unsafe { CloseHandle(handle) };
+            return Err("同期キーの共有メモリを写せない".to_string());
+        }
+        let s = SyncShare { handle, view };
+        s.set(key);
+        Ok(s)
+    }
+
+    /// 同期キーを書く（設定の再読込で変わったとき用）。`None` なら「無し」。
+    pub fn set(&self, key: Option<Key>) {
+        let mut buf = [0u8; SYNC_SHARE_SIZE];
+        if let Some(k) = key {
+            write_sync_share(&mut buf, u32::from(k.code), k.prefix != ScanPrefix::None);
+        }
+        // SAFETY: view は SYNC_SHARE_SIZE バイトの書ける領域。
+        unsafe { (self.view.Value as *mut [u8; SYNC_SHARE_SIZE]).write_volatile(buf) };
+    }
+}
+
+impl Drop for SyncShare {
+    fn drop(&mut self) {
+        // SAFETY: create で得た有効な写しとハンドル。
+        unsafe {
+            let _ = UnmapViewOfFile(self.view);
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+// エンジンスレッドに渡すため。ハンドルと写しはプロセス内で共有できる。
+unsafe impl Send for SyncShare {}

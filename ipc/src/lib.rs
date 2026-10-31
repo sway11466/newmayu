@@ -15,6 +15,25 @@ pub enum Kind {
     Lock,
     /// フォーカスが移った。本文はクラス名の列とタイトルの列（UTF-8）。
     Focus,
+    /// 本体が `&Sync` で出した同期キー（`def sync`）の離しが、そのスレッドのメッセージループに届いた。本文なし。
+    Sync,
+}
+
+/// 同期キーを DLL に知らせる共有メモリの名前。本体が作り、DLL が読む。
+pub const SYNC_SHARE_NAME: &str = r"Local\newmayu-sync";
+/// 共有メモリの中身: `[u32 スキャンコード][u32 拡張(E0/E1)なら 1]`（LE）。スキャンコード 0 = 同期キー無し。
+pub const SYNC_SHARE_SIZE: usize = 8;
+
+pub fn write_sync_share(buf: &mut [u8; SYNC_SHARE_SIZE], scan: u32, extended: bool) {
+    buf[0..4].copy_from_slice(&scan.to_le_bytes());
+    buf[4..8].copy_from_slice(&u32::from(extended).to_le_bytes());
+}
+
+/// `(スキャンコード, 拡張)`。
+pub fn read_sync_share(b: &[u8; SYNC_SHARE_SIZE]) -> (u32, bool) {
+    let scan = u32::from_le_bytes(b[0..4].try_into().unwrap());
+    let ext = u32::from_le_bytes(b[4..8].try_into().unwrap());
+    (scan, ext != 0)
 }
 
 impl Kind {
@@ -22,12 +41,14 @@ impl Kind {
         match self {
             Kind::Lock => 1,
             Kind::Focus => 2,
+            Kind::Sync => 3,
         }
     }
     const fn from_code(c: u32) -> Option<Kind> {
         match c {
             1 => Some(Kind::Lock),
             2 => Some(Kind::Focus),
+            3 => Some(Kind::Sync),
             _ => None,
         }
     }
@@ -131,7 +152,7 @@ impl Notify {
     pub fn from_bytes(b: &[u8]) -> Option<Notify> {
         let header = Header::read(b)?;
         let (class, title) = match header.kind {
-            Kind::Lock => {
+            Kind::Lock | Kind::Sync => {
                 if b.len() != Header::SIZE {
                     return None;
                 }
@@ -184,6 +205,28 @@ mod tests {
         let mut bad = buf;
         bad[0] = 99;
         assert_eq!(Notify::from_bytes(&bad[..n]), None);
+    }
+
+    #[test]
+    fn sync_roundtrip() {
+        let h = Header {
+            kind: Kind::Sync,
+            cause: 12,
+            thread_id: 7,
+            hwnd: 8,
+            flags: 0,
+        };
+        let mut buf = [0u8; MAX_SIZE];
+        let n = write_lock(&mut buf, &h);
+        let got = Notify::from_bytes(&buf[..n]).unwrap();
+        assert_eq!(got.header, h);
+        assert_eq!(got.class, "");
+
+        let mut s = [0u8; SYNC_SHARE_SIZE];
+        write_sync_share(&mut s, 0x7e, true);
+        assert_eq!(read_sync_share(&s), (0x7e, true));
+        write_sync_share(&mut s, 0, false);
+        assert_eq!(read_sync_share(&s), (0, false));
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //! def key NAME... = [E0-|E1-]SCANCODE          # NAME を ( ) で囲む形も可。スキャンコードは 1 個
 //! def mod (shift|alt|control|windows) = KEY...
 //! def alias NAME = KEY
-//! def sync = SCANCODE                          # 読むだけ（&Sync は未対応）
+//! def sync = SCANCODE                          # &Sync で出す同期キー
 //! keymap NAME [: PARENT] [= ACTION...]        # 同名の再宣言はそのキーマップに戻る。= は割付の無いキーの既定動作
 //! keymap2 NAME [: PARENT] [= ACTION...]       # keymap と同じ（yamy でも同じ）
 //! window NAME [WINDOW] [: PARENT] [= ACTION...]
@@ -22,6 +22,7 @@
 //!                                              #        | &Ignore | &Undefined | &VK([E-][D-|U-]名前|番号)
 //!                                              #        | &PostMessage(宛先, msg, wParam, lParam)
 //!                                              #        | &Variable(mag, inc) | &Repeat(( ACTION... ) | $keyseq名 [, 上限])
+//!                                              #        | &Sync
 //!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）
 //!                                              # NL- CL- SL- KL-（NumLock CapsLock ScrollLock カナ）も書ける
 //! mod MODNAME (=|+=|-=) KEY...
@@ -133,6 +134,8 @@ struct Loader {
     can_read: Vec<bool>,
     /// `keyseq $名`（小文字化）→ 展開済みの動作列。
     keyseqs: HashMap<String, Vec<Action>>,
+    /// `def sync`。
+    sync: Option<Key>,
     keymaps: Vec<KeymapBuild>,
     /// キーマップ名（小文字化）→ `keymaps` の添字。
     keymap_names: HashMap<String, usize>,
@@ -394,6 +397,7 @@ impl Loader {
             symbols: HashSet::new(),
             can_read: Vec::new(),
             keyseqs: HashMap::new(),
+            sync: None,
             keymaps: vec![global],
             keymap_names,
             current: 0,
@@ -628,8 +632,7 @@ impl Loader {
             "alias" => self.load_def_alias(cur),
             "sync" => {
                 self.expect_sym(cur, "=")?;
-                // 読むだけ。&Sync はサブセット外
-                let _ = self.load_scan_code(cur)?;
+                self.sync = Some(self.load_scan_code(cur)?);
                 self.expect_end(cur)
             }
             "option" | "subst" => self.err(format!("`def {what}` は未対応")),
@@ -1035,6 +1038,10 @@ impl Loader {
                     }
                     if fname.eq_ignore_ascii_case("Ignore") {
                         out.push(Action::Ignore);
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("Sync") {
+                        out.push(Action::Sync);
                         continue;
                     }
                     if fname.eq_ignore_ascii_case("VK") {
@@ -1461,6 +1468,7 @@ impl Loader {
         for (i, keys) in self.def_mods.iter().enumerate() {
             config.def_mod(BasicMod::ALL[i], keys.iter().copied());
         }
+        config.sync = self.sync;
         Ok(config)
     }
 }
@@ -1953,6 +1961,15 @@ keymap Sub : Global"
         );
         assert!(load_err("key A = &MouseMove(1, 2").message.contains("`)`"));
         assert!(load_err("key A = &MouseMove(1,, 2)").message.contains("空"));
+    }
+
+    #[test]
+    fn def_sync_and_sync_function() {
+        let c = load_ok("def sync = E0-0x7e\nkey A = &Sync &WindowMaximize");
+        assert_eq!(c.sync, Some(Key::e0(0x7e)));
+        assert_eq!(only(global(&c), A).actions[0], Action::Sync);
+        let c = load_ok("key A = &Sync");
+        assert_eq!(c.sync, None);
     }
 
     #[test]
