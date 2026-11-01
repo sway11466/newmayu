@@ -136,8 +136,8 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 
 | 関数 | yamy の動き | newmayu | 備考 |
 |---|---|---|---|
-| `&HelpMessage([title, message])` | トレイ付近にメッセージを出す。引数なしで消す | × | feature-4 |
-| `&HelpVariable(title)` | 内部変数の値を title と一緒に出す | × | feature-4 |
+| `&HelpMessage([title, message])` | トレイ付近にメッセージを出す。引数なしで消す | × | feature-4。出し方は yamy と異なる（6 章） |
+| `&HelpVariable(title)` | 内部変数の値を title と一緒に出す | × | feature-4。出し方は 6 章 |
 | `&DescribeBindings` | いまのキーマップの割付を表示する | × | |
 | `&InvestigateCommand` | 窓に届く WM_COMMAND / WM_SYSCOMMAND をログに出すモードの切り替え | × | feature-5 |
 | `&LoadSetting([設定名])` | 設定を読み直す | × | feature-5 |
@@ -159,3 +159,21 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | 32 ビットプロセス | yamyd32.exe を別に起こしてフックを入れる | × | parking lot |
 | 画面ロック中 | 置換は働かない。ロック前に押していたキーが押しっぱなしになることがある（私家版は復帰時にモディファイヤを離す） | 未確認 | |
 | NLS キーのエスケープ | 半角/全角・英数・ひらがな・無変換は WH_KEYBOARD_LL の前に処理されるため正しくフックできない。Scancode Map で別キーに置き換える回避策（workaround.reg / workaround.mayu）と、動作中だけレジストリを書き換える実験機能（`yamy.ini` の escapeNLSKeys） | × | |
+
+## 6. 案内の窓（&HelpMessage / &HelpVariable）
+
+yamy はトレイ付近に出す。newmayu はトレイ通知を使わず、次の窓で出す。
+
+- 場所：フォーカス窓がある画面の下の中央。
+- 出るとき：関数を実行したらすぐ。待ちは入れない。
+- 見た目：Windows 11 の音量表示に合わせる。ライト / ダークは OS の設定に従う。背景は透けない。
+- 中身：1 行目にタイトル（太字）、その下に本文。`&HelpVariable` は本文が `&Variable` の値。
+- 消えるとき：5 秒たったとき、または引数なしの `&HelpMessage`。
+- 窓の扱い：タスクバーにも Alt+Tab にも出さない。フォーカスを奪わない。クリックは下の窓へ素通りする。
+- ピン：板の上にピンのボタンを置く。ボタンだけはクリックを受け、押してもフォーカスを奪わない。
+- ピン留めした窓：
+  - その場に残り、時間でも引数なしの `&HelpMessage` でも消えない。
+  - 窓全体がクリックを受け、どこを掴んでもドラッグで動かせる。
+  - ピンをもう一度押すと消える。
+  - 何枚でも残せる。
+- ピン留め中に次の案内が来たら、別の窓として下の中央に出す。
