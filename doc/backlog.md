@@ -4,7 +4,7 @@
 
 ## index
 
-次回採番: bug=2 / feature=8 / refactoring=1.
+次回採番: bug=2 / feature=15 / refactoring=1.
 
 項目（バグ bug / 機能追加 feature / リファクタリング refactoring）を追加するときは、該当カテゴリの採番を +1 して ID を継ぐ。完了した項目は本書から削除し、番号は再利用しない（過去の使用済み番号は `git log -p -- doc/backlog.md | grep -oE '(bug|feature|refactoring)-[0-9]+' | sort -u` で確認できる）。状態は「本書に載っていれば未完了／消えていれば完了」で表す（状態列は持たない）。ゴールは、その作業で何が達成されていれば終わりなのかを1文で書く。手段ではなく到達点を書く。
 
@@ -49,6 +49,62 @@
 - 背景：変換中はフック DLL が `WM_IME_STARTCOMPOSITION` / `WM_IME_ENDCOMPOSITION` を見て取っている。IMM32 のアプリ（Win+R の入力欄）では取れたが、TSF のアプリにはこのメッセージが来ない。IME のオン・オフは取れている。
 - 対応：TSF の `ITfThreadMgr` / `ITfContext` の状態を DLL の中から読む、または `ITfUIElementSink` 系の通知を受ける方法を調べ、取れる方法で DLL に足す。
 - 該当：`hook/src/lib.rs`・`ipc/src/lib.rs`。
+
+### feature-8
+
+**def subst（入力キーの置き換え）**
+- ゴール：`def subst` を含む `.mayu` が読め、yamy と同じくキーマップで引く前に入力キーが置き換わる。
+- 背景：オーナーの Dvorak.mayu（109 配列の上で Dvorak 配列にする設定）が使う。左側は修飾付きのキー（`S-*_0`）、右側はキーか keyseq（`$TILDE`）。yamy では右側は先頭のキーだけが効く。いまは読み込みエラーにしている。
+- 対応：(1) パーサーで読み、置き換え表を持つ。(2) エンジンでキーマップを引く前に置き換える。(3) 右側が keyseq のときの yamy の扱いを確かめて合わせる。
+- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
+
+### feature-9
+
+**One Shot モディファイヤ（`mod … = !!キー`）**
+- ゴール：`mod win = !!LWin` のように `!!` を付けたモディファイヤキーが、yamy と同じく単独で押して離したときにそのキーとして働く。
+- 背景：オーナーの Global.mayu が Win キーに使う。yamy には `!`（真のモディファイヤ）・`!!`（One Shot）・`!!!`（One Shot＋リピート）がある。いまは読み込みエラーにしている。
+- 対応：(1) パーサーで `!!` を読む。(2) エンジンで、押してから離すまでに他のキーが無かったかを見て、無ければそのキーの動作を出す。
+- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
+
+### feature-10
+
+**&MouseWheel**
+- ゴール：`&MouseWheel(delta)` を含む `.mayu` が読め、押すと yamy と同じくホイールが回る（120 で 1 単位）。
+- 背景：オーナーの Global.mayu が C-S-v に割り付けている。いまは読み込みエラーにしている。
+- 対応：(1) パーサーに足す。(2) `SendInput` の `MOUSEEVENTF_WHEEL` で出す。
+- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`・`src/platform.rs`。
+
+### feature-11
+
+**&Keymap**
+- ゴール：`&Keymap(名前)` を含む `.mayu` が読め、押すと yamy と同じく指定のキーマップで引き直す。
+- 背景：オーナーの Excel.mayu が C-c / C-x に使う。いまは読み込みエラーにしている。
+- 対応：(1) パーサーに足す。(2) エンジンで指定のキーマップで引き直す（`&KeymapParent` と同じ流れ）。
+- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
+
+### feature-12
+
+**&DescribeBindings**
+- ゴール：`&DescribeBindings` を含む `.mayu` が読め、押すと yamy と同じくいまのキーマップの割付が見られる。
+- 背景：オーナーの Word.mayu が C-S-Slash に割り付けている。yamy はログに出す。いまは読み込みエラーにしている。
+- 対応：(1) パーサーに足す。(2) いまのキーマップと親の割付を並べて出す。未決：出し先（ログだけか、窓を出すか）。
+- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
+
+### feature-13
+
+**&ShellExecute**
+- ゴール：`&ShellExecute(operation, file, parameters, directory, show_command)` を含む `.mayu` が読め、押すと yamy と同じくプログラムやファイルが開く。
+- 背景：オーナーの MDIE.mayu・tablacus.mayu がファイラを開くのに使う。いまは読み込みエラーにしている。
+- 対応：(1) パーサーに足す（show_command は `ShowNormal` などの名前）。(2) Win32 の `ShellExecuteW` を呼ぶ。
+- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
+
+### feature-14
+
+**空の引数**
+- ゴール：`&HelpMessage("KeyMap", )` のように空の引数を含む `.mayu` が、yamy と同じく読める。
+- 背景：オーナーの ObjectBrowser.mayu にある（行末の `\` で続けた後が `)`）。yamy では読めている。いまは「引数が空」の読み込みエラーにしている。
+- 対応：yamy のパーサーが空の引数をどう読むかを調べて合わせる。
+- 該当：`src/config/parser.rs`。
 
 ## リファクタリング
 
