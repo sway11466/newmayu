@@ -10,6 +10,7 @@
 //! def mod (shift|alt|control|windows) = KEY...
 //! def alias NAME = KEY
 //! def sync = SCANCODE                          # &Sync で出す同期キー
+//! def subst MODKEY... (=|=>) ACTION...         # キーマップで引く前に入力キーを置き換える。右辺は先頭のキーだけ使う
 //! keymap NAME [: PARENT] [= ACTION...]        # 同名の再宣言はそのキーマップに戻る。= は割付の無いキーの既定動作
 //! keymap2 NAME [: PARENT] [= ACTION...]       # keymap と同じ（yamy でも同じ）
 //! window NAME [WINDOW] [: PARENT] [= ACTION...]
@@ -27,7 +28,7 @@
 //!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）
 //!                                              # NL- CL- SL- KL-（NumLock CapsLock ScrollLock カナ）も書ける
 //! mod MODNAME (=|+=|-=) KEY...
-//! keyseq $NAME = ACTION...                     # 使う側で展開する
+//! keyseq $NAME = ACTION...                     # 使う側で展開する。キーに IL- IC- なども書ける（def subst の右辺で効く）
 //! ```
 //!
 //! 修飾の書き方は yamy の `load_MODIFIER` と同じ: `*` は直後の修飾（キー名の直前なら未指定の全部）を
@@ -35,7 +36,7 @@
 //! `U-` `D-` は押し・離しの区別（両方または無指定なら両方）。
 //! 未指定の `IC-` は「変換中でない」を要求し（yamy の既定）、`IL-` は dontcare。
 //!
-//! これ以外（`def option`、`def subst`、上記以外の `&関数`、`!`/`!!`/`!!!`、R- MAX- 等の割当修飾、2 個以上のスキャンコード）は
+//! これ以外（`def option`、上記以外の `&関数`、`!`/`!!`/`!!!`、R- MAX- 等の割当修飾、2 個以上のスキャンコード）は
 //! エラーにする。
 //!
 //! ファイルの文字コードは UTF-8（BOM の有無は問わない）か CP932。UTF-8 として正しければ UTF-8、
@@ -50,7 +51,7 @@ use super::lexer::{Line, Token, tokenize};
 use super::vkeys::vk_by_name;
 use crate::model::{
     Action, BasicMod, Config, EdgeSpec, EventKind, Func, Gravity, HelpText, Key, Keymap, KeymapId,
-    LockMod, LockSpec, ModSpec, ScanPrefix, Target, ToWindow, WindowMatch, WindowOp,
+    LockMod, LockSpec, ModSpec, ScanPrefix, Subst, Target, ToWindow, WindowMatch, WindowOp,
 };
 
 /// 最大の include 深さ。循環 include もこれで止まる。
@@ -137,6 +138,8 @@ struct Loader {
     keyseqs: HashMap<String, Vec<Action>>,
     /// `def sync`。
     sync: Option<Key>,
+    /// `def subst`。照合する順（後に書いたものが先）。
+    substs: Vec<Subst>,
     keymaps: Vec<KeymapBuild>,
     /// キーマップ名（小文字化）→ `keymaps` の添字。
     keymap_names: HashMap<String, usize>,
@@ -413,6 +416,7 @@ impl Loader {
             can_read: Vec::new(),
             keyseqs: HashMap::new(),
             sync: None,
+            substs: Vec::new(),
             keymaps: vec![global],
             keymap_names,
             current: 0,
@@ -650,9 +654,56 @@ impl Loader {
                 self.sync = Some(self.load_scan_code(cur)?);
                 self.expect_end(cur)
             }
-            "option" | "subst" => self.err(format!("`def {what}` は未対応")),
+            "subst" => self.load_def_subst(cur),
+            "option" => self.err(format!("`def {what}` は未対応")),
             _ => self.err(format!("知らない定義 `def {what}`")),
         }
+    }
+
+    /// `def subst MODKEY... (=|=>) ACTION...`（yamy の `load_DEFINE_SUBSTITUTE`）。
+    /// 右辺は keyseq として読み、先頭のキーだけを使う（`$名` の中も先頭）。残りは捨てる。
+    fn load_def_subst(&mut self, cur: &mut Cur) -> Result<()> {
+        let mut lhs = Vec::new();
+        loop {
+            let m = self.load_modifier(cur)?;
+            let Some(t) = cur.next() else {
+                return self.err("`=` が無い");
+            };
+            let key = self.key_by_name(t)?;
+            lhs.push((key, m));
+            match cur.peek() {
+                Some(Token::Sym("=")) | Some(Token::Sym("=>")) => {
+                    cur.next();
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let actions = self.load_actions(cur, false, true)?;
+        let Some(&Action::Key {
+            key: to_key,
+            mods: to_mods,
+            locks: to_locks,
+            ..
+        }) = actions.first()
+        else {
+            return self.err("`def subst` の右辺の先頭がキーでない");
+        };
+        for (key, m) in lhs {
+            self.substs.insert(
+                0,
+                Subst {
+                    key,
+                    mods: m.mods,
+                    edge: m.edge,
+                    locks: m.locks,
+                    to_key,
+                    to_mods,
+                    to_locks,
+                },
+            );
+        }
+        Ok(())
     }
 
     /// `def key NAME... = SCANCODE` / `def key ( NAME... ) = SCANCODE`
@@ -805,7 +856,7 @@ impl Loader {
         let mut default_actions = None;
         if cur.peek_sym("=") || cur.peek_sym("=>") {
             cur.next();
-            default_actions = Some(self.load_actions(cur, false)?);
+            default_actions = Some(self.load_actions(cur, false, false)?);
         }
         self.expect_end(cur)?;
         let l = lower(&name);
@@ -873,7 +924,7 @@ impl Loader {
             ));
         };
         self.expect_sym(cur, "=")?;
-        let actions = self.load_actions(cur, false)?;
+        let actions = self.load_actions(cur, false, false)?;
         self.keymaps[self.current].keymap.set_event(kind, actions);
         Ok(())
     }
@@ -882,7 +933,7 @@ impl Loader {
     fn load_repeat(&mut self, cur: &mut Cur) -> Result<Action> {
         self.expect_sym(cur, "(")?;
         let actions = match cur.next() {
-            Some(Token::Sym("(")) => self.load_actions(cur, true)?,
+            Some(Token::Sym("(")) => self.load_actions(cur, true, false)?,
             Some(Token::Sym("$")) => {
                 let Some(t) = cur.next() else {
                     return self.err("`$` の後は keyseq 名");
@@ -935,7 +986,7 @@ impl Loader {
                 _ => {}
             }
         }
-        let actions = self.load_actions(cur, false)?;
+        let actions = self.load_actions(cur, false, false)?;
         let km = &mut self.keymaps[self.current].keymap;
         for (key, m) in lhs {
             km.assign(key, m.mods, m.edge, m.locks, actions.clone());
@@ -1000,7 +1051,7 @@ impl Loader {
         };
         let name = self.name_of(t)?;
         self.expect_sym(cur, "=")?;
-        let actions = self.load_actions(cur, false)?;
+        let actions = self.load_actions(cur, false, true)?;
         self.keyseqs.insert(lower(&name), actions);
         Ok(())
     }
@@ -1008,12 +1059,22 @@ impl Loader {
     // ---- 動作列と修飾 ----------------------------------------------------
 
     /// `ACTION...`。`in_paren` なら `)` で止まる。
-    fn load_actions(&mut self, cur: &mut Cur, in_paren: bool) -> Result<Vec<Action>> {
+    /// `locks_ok` なら出力キーに IL- IC- などを書ける（`keyseq` と `def subst` の右辺。yamy と同じ）。
+    /// そうでなければエラーにし、鍵の条件は全部 dontcare にする。
+    fn load_actions(
+        &mut self,
+        cur: &mut Cur,
+        in_paren: bool,
+        locks_ok: bool,
+    ) -> Result<Vec<Action>> {
         let mut out = Vec::new();
         while !cur.at_end() {
-            let m = self.load_modifier(cur)?;
-            if m.locks_specified {
-                return self.err("IL- IC- は出力キーには付けられない");
+            let mut m = self.load_modifier(cur)?;
+            if !locks_ok {
+                if m.locks_specified {
+                    return self.err("IL- IC- は出力キーには付けられない");
+                }
+                m.locks = LockSpec::any();
             }
             let Some(t) = cur.next() else {
                 return self.err("修飾の後にキー名が無い");
@@ -1021,7 +1082,7 @@ impl Loader {
             match t {
                 Token::Sym(")") if in_paren => return Ok(out),
                 Token::Sym("(") => {
-                    let inner = self.load_actions(cur, true)?;
+                    let inner = self.load_actions(cur, true, locks_ok)?;
                     out.extend(inner);
                 }
                 Token::Sym("$") => {
@@ -1138,6 +1199,7 @@ impl Loader {
                         key,
                         mods: m.mods,
                         edge: m.edge,
+                        locks: m.locks,
                     });
                 }
             }
@@ -1532,6 +1594,7 @@ impl Loader {
             config.def_mod(BasicMod::ALL[i], keys.iter().copied());
         }
         config.sync = self.sync;
+        config.substs = self.substs;
         Ok(config)
     }
 }
@@ -1603,6 +1666,16 @@ mod tests {
         v[0]
     }
 
+    /// `keyseq` の中のキー。鍵の条件は割付の左辺と同じ既定（変換中でない）を持つ。
+    fn in_keyseq(key: Key, mods: ModSpec) -> Action {
+        Action::Key {
+            key,
+            mods,
+            edge: EdgeSpec::Both,
+            locks: LockSpec::assign_default(),
+        }
+    }
+
     #[test]
     fn def_key_mod_alias_and_simple_assign() {
         let c = load_ok("key A = B\nkey bs = Space");
@@ -1649,17 +1722,20 @@ mod tests {
                 Action::Key {
                     key: B,
                     mods: ModSpec::any().with(BasicMod::Shift),
-                    edge: EdgeSpec::Both
+                    edge: EdgeSpec::Both,
+                    locks: LockSpec::any()
                 },
                 Action::Key {
                     key: LSHIFT,
                     mods: base(),
-                    edge: EdgeSpec::Down
+                    edge: EdgeSpec::Down,
+                    locks: LockSpec::any()
                 },
                 Action::Key {
                     key: LSHIFT,
                     mods: base(),
-                    edge: EdgeSpec::Up
+                    edge: EdgeSpec::Up,
+                    locks: LockSpec::any()
                 },
             ]
         );
@@ -1684,7 +1760,7 @@ mod tests {
         assert_eq!(
             only(main, A).actions,
             vec![
-                Action::key_with(EISUU, base().with(BasicMod::Shift)),
+                in_keyseq(EISUU, base().with(BasicMod::Shift)),
                 Action::key_with(B, base()),
                 Action::key_with(H, base()),
                 Action::Prefix(sub_id),
@@ -2133,7 +2209,7 @@ keymap Sub : Global"
         assert_eq!(
             only(sub, H).actions,
             vec![Action::Repeat {
-                actions: vec![Action::key_with(SPACE, base())],
+                actions: vec![in_keyseq(SPACE, base())],
                 max: 10
             }]
         );
@@ -2322,5 +2398,47 @@ keymap Sub : Global"
         assert!(load_err("keymap X : Nowhere").message.contains("未定義"));
         assert!(load_err("def key A = 0x01").message.contains("定義済み"));
         assert!(load_err("key C- = B").message.contains("未対応"));
+        assert!(
+            load_err("def subst A = &Default")
+                .message
+                .contains("キーでない")
+        );
+    }
+
+    #[test]
+    fn def_subst() {
+        let c = load_ok(
+            "keyseq $SB = S-*B A
+             def subst S-*A = $SB
+             def subst H Space => IC-BS
+             def subst D-LAlt = B
+             def subst *H = A",
+        );
+        let s = &c.substs;
+        assert_eq!(s.len(), 5);
+        // 後に書いたものが先に照合される
+        assert_eq!((s[0].key, s[0].to_key), (H, A));
+        assert_eq!(s[0].mods, ModSpec::any());
+        assert_eq!(s[0].locks, LockSpec::any());
+        assert_eq!(s[1].edge, EdgeSpec::Down);
+        // 左辺が複数なら同じ置き換え先を共有する。右辺には IC- を書ける
+        assert_eq!((s[2].key, s[3].key), (SPACE, H));
+        for x in &s[2..4] {
+            assert_eq!(x.to_key, BS);
+            assert_eq!(x.mods, base());
+            assert_eq!(x.locks, LockSpec::assign_default());
+            assert_eq!(
+                x.to_locks,
+                LockSpec::assign_default().with(LockMod::ImeComp)
+            );
+        }
+        // 右辺が keyseq なら先頭のキーだけ
+        assert_eq!(s[4].key, A);
+        assert_eq!(s[4].mods, ModSpec::any().with(BasicMod::Shift));
+        assert_eq!(s[4].to_key, B);
+        assert_eq!(s[4].to_mods, ModSpec::any().with(BasicMod::Shift));
+        assert_eq!(s[4].to_locks, LockSpec::any());
+        // keyseq にも IL- IC- を書ける（出力には効かない）
+        load_ok("keyseq $X = IL-A\nkey B = $X");
     }
 }

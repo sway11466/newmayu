@@ -23,7 +23,7 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | `def mod (shift\|alt\|control\|windows) = キー名…` | 物理モディファイヤキーを定義する。alt は meta / menu、control は ctrl、windows は win とも書ける | ○ | |
 | `def sync = スキャンコード` | `&Sync` で Windows に送るキー | ○ | |
 | `def alias 別名 = キー名` | キーの別名。既存のキー名と同じなら別名が勝つ | ○ | |
-| `def subst キー = キー…` | キーマップで変換する前に入力キーを置き換える。右側は先頭のキーだけが効く | × | |
+| `def subst キー = キー…` | キーマップで変換する前に入力キーを置き換える。右側は先頭のキーだけが効く | ○ | |
 | `def option KL- = enable` | フォーカス移動時に IME を on/off して、カナロックの状態を正しく取る | × | |
 | `def option delay-of !!! = N` | `!!!` のキーリピートが始まるまで無視するリピート回数 | × | `!!!` 自体が未対応 |
 | `def option sts4mayu = enable` / `cts4mayu` | タッチパッドの `T-` `TS-` 修飾を有効にする（別 DLL が要る） | × | |

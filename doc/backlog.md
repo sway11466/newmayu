@@ -50,14 +50,6 @@
 - 対応：TSF の `ITfThreadMgr` / `ITfContext` の状態を DLL の中から読む、または `ITfUIElementSink` 系の通知を受ける方法を調べ、取れる方法で DLL に足す。
 - 該当：`hook/src/lib.rs`・`ipc/src/lib.rs`。
 
-### feature-8
-
-**def subst（入力キーの置き換え）**
-- ゴール：`def subst` を含む `.mayu` が読め、yamy と同じくキーマップで引く前に入力キーが置き換わる。
-- 背景：オーナーの Dvorak.mayu（109 配列の上で Dvorak 配列にする設定）が使う。左側は修飾付きのキー（`S-*_0`）、右側はキーか keyseq（`$TILDE`）。yamy では右側は先頭のキーだけが効く。いまは読み込みエラーにしている。
-- 対応：(1) パーサーで読み、置き換え表を持つ。(2) エンジンでキーマップを引く前に置き換える。(3) 右側が keyseq のときの yamy の扱いを確かめて合わせる。
-- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
-
 ### feature-9
 
 **One Shot モディファイヤ（`mod … = !!キー`）**

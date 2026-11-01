@@ -163,6 +163,12 @@ impl ModSpec {
         (self.pressed | self.dontcare) == (state.0 | self.dontcare)
     }
 
+    /// care の修飾をこの条件の値に、dontcare の修飾を `state` の値にした状態。
+    /// `def subst` の置き換え先の修飾を入力に重ねるときに使う。
+    pub const fn apply(self, state: ModState) -> ModState {
+        ModState((state.0 & self.dontcare) | (self.pressed & !self.dontcare))
+    }
+
     /// 修飾状態をそのまま条件にする（全修飾を care）。
     pub const fn from_state(state: ModState) -> ModSpec {
         ModSpec {
@@ -323,6 +329,11 @@ impl LockSpec {
     pub const fn matches(self, state: LockState) -> bool {
         (self.on | self.dontcare) == (state.0 | self.dontcare)
     }
+
+    /// care の鍵をこの条件の値に、dontcare の鍵を `state` の値にした状態（`ModSpec::apply` と同じ）。
+    pub const fn apply(self, state: LockState) -> LockState {
+        LockState((state.0 & self.dontcare) | (self.on & !self.dontcare))
+    }
 }
 
 /// キーマップの識別子（`Config::keymaps` の添字）。
@@ -411,10 +422,13 @@ impl Eq for WindowMatch {}
 pub enum Action {
     /// キーを出力する。`mods` の dontcare は現在の修飾で埋まる（`*LControl`）。
     /// `edge` が `Both` なら押し・離しの両方を出す。
+    /// `locks` は出力には効かない。`keyseq` の中にだけ書け（yamy と同じ）、
+    /// `def subst` の置き換え先として使われたときに効く。それ以外では全部 dontcare。
     Key {
         key: Key,
         mods: ModSpec,
         edge: EdgeSpec,
+        locks: LockSpec,
     },
     /// `&Prefix(キーマップ)`: 次の 1 キーだけ指定キーマップで解決する。
     Prefix(KeymapId),
@@ -630,6 +644,7 @@ impl Action {
             key,
             mods: ModSpec::none(),
             edge: EdgeSpec::Both,
+            locks: LockSpec::any(),
         }
     }
     pub const fn key_with(key: Key, mods: ModSpec) -> Self {
@@ -637,8 +652,24 @@ impl Action {
             key,
             mods,
             edge: EdgeSpec::Both,
+            locks: LockSpec::any(),
         }
     }
+}
+
+/// `def subst 修飾-キー = 修飾-キー` の 1 つ（yamy の `Keyboard::Substitute`）。
+///
+/// 入力が左辺（`key` `mods` `edge` `locks`）に合えば、キーマップで引く前にキーを `to_key` に、
+/// 修飾と鍵の状態を `to_mods` `to_locks` で決め打ちする（dontcare のものは入力のまま）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Subst {
+    pub key: Key,
+    pub mods: ModSpec,
+    pub edge: EdgeSpec,
+    pub locks: LockSpec,
+    pub to_key: Key,
+    pub to_mods: ModSpec,
+    pub to_locks: LockSpec,
 }
 
 /// `key 修飾-キー = 動作…` の 1 行。
@@ -774,6 +805,8 @@ pub struct Config {
     pub def_mods: [Vec<Key>; BasicMod::ALL.len()],
     /// `def sync = SCANCODE`。`&Sync` で出す同期キー。無ければ `&Sync` は何もしない。
     pub sync: Option<Key>,
+    /// `def subst`。キーマップに関係なく全体で 1 つ。照合する順（後に書いたものが先）に並ぶ。
+    pub substs: Vec<Subst>,
 }
 
 impl Config {
@@ -782,7 +815,21 @@ impl Config {
             keymaps,
             def_mods: Default::default(),
             sync: None,
+            substs: Vec::new(),
         }
+    }
+
+    /// 入力に合う `def subst` を探す（yamy の `Keyboard::searchSubstitute`）。
+    pub fn substitute(
+        &self,
+        key: Key,
+        mods: ModState,
+        locks: LockState,
+        edge: Edge,
+    ) -> Option<&Subst> {
+        self.substs.iter().find(|s| {
+            s.key == key && s.mods.matches(mods) && s.locks.matches(locks) && s.edge.matches(edge)
+        })
     }
 
     /// 前景窓に一致する `window` キーマップを、照合する順に並べる。

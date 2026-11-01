@@ -2,7 +2,7 @@
 //!
 //! OS には依存しない。フック側はキー 1 つごとに [`Engine::feed`] を呼び、
 //! 返った [`Output`] を `SendInput` に流す（物理入力そのものは常に抑制する前提）。
-//! yamy の `Engine::keyboardHandler` 以降の流れのうち、基本修飾・キーマップ木・
+//! yamy の `Engine::keyboardHandler` 以降の流れのうち、基本修飾・`def subst`・キーマップ木・
 //! `key` 割付・キー出力・`&Prefix`・窓によるキーマップ選択を写している。
 //!
 //! 窓の情報（クラス名の列・タイトルの列）はフック DLL から届き、[`Engine::set_focus`] で入る。
@@ -77,10 +77,14 @@ const MAX_KEYMAP_RECURSION: usize = 64;
 /// 1 キーの処理中に持ち回る値（yamy の `Engine::Current`）。
 #[derive(Clone, Copy)]
 struct Current {
-    /// 物理キー。`&Default` が使う。
+    /// 物理キー。押したときの動作列をこのキーで覚える。
+    input: Key,
+    /// 割付を引くキー。`&Default` が出す。`def subst` があれば置き換えた後のキー、無ければ物理キー。
     key: Key,
-    /// 入力時の修飾の状態。割付の照合に使う。
+    /// 入力時の修飾の状態（`def subst` で置き換えた後）。割付の照合に使う。
     state: ModState,
+    /// 入力時の鍵の状態（`def subst` で置き換えた後）。割付の照合に使う。
+    locks: LockState,
     /// 出力キーの修飾を埋める元。自分が修飾キーならその修飾は dontcare。
     event_mods: ModSpec,
     /// 窓に一致するキーマップ列のうち、いま何番目を引いているか（`&OtherWindowClass` が進める）。
@@ -230,12 +234,22 @@ impl Engine {
         }
 
         let keymap_id = self.current;
-        let cur = Current {
+        let mut cur = Current {
+            input: key,
             key,
             state,
+            locks: self.locks,
             event_mods,
             focus_idx: 0,
         };
+        // def subst: キーマップで引く前にキーを置き換える（yamy の beginGeneratingKeyboardEvents）。
+        // 置き換え先で書いた修飾・鍵はその値に、dontcare のものは入力のままにする。
+        if let Some(s) = self.config.substitute(key, state, self.locks, edge) {
+            cur.key = s.to_key;
+            cur.state = s.to_mods.apply(state);
+            cur.locks = s.to_locks.apply(self.locks);
+            cur.event_mods = s.to_mods.add(event_mods);
+        }
         // 離しは、押したときに覚えた動作列があればそれを使う
         let held = match edge {
             Edge::Down => None,
@@ -298,7 +312,6 @@ impl Engine {
         if depth >= MAX_KEYMAP_RECURSION {
             return;
         }
-        let locks = self.locks;
         let keymap = self.config.keymap(keymap_id);
         let part_of = |spec: EdgeSpec| match spec {
             EdgeSpec::Both => match edge {
@@ -307,7 +320,7 @@ impl Engine {
             },
             EdgeSpec::Down | EdgeSpec::Up => Part::All,
         };
-        let (actions, part) = match keymap.search(cur.key, cur.state, locks, edge) {
+        let (actions, part) = match keymap.search(cur.key, cur.state, cur.locks, edge) {
             Some(a) => (a.actions.clone(), part_of(a.edge)),
             None => (keymap.default_actions.clone(), part_of(EdgeSpec::Both)),
         };
@@ -317,7 +330,7 @@ impl Engine {
         match part {
             Part::Down => {
                 self.held.insert(
-                    cur.key,
+                    cur.input,
                     Held {
                         actions: actions.clone(),
                         keymap_id,
@@ -326,7 +339,7 @@ impl Engine {
                 );
             }
             Part::All => {
-                self.held.remove(&cur.key);
+                self.held.remove(&cur.input);
             }
             Part::Up => {}
         }
@@ -387,6 +400,7 @@ impl Engine {
                 key,
                 mods,
                 edge: spec,
+                ..
             } => {
                 if !spec.matches(edge) {
                     return;
@@ -561,7 +575,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Action, EventKind, Keymap, LockSpec, WindowMatch, WindowOp};
+    use crate::model::{Action, EventKind, Keymap, LockSpec, Subst, WindowMatch, WindowOp};
 
     // 109.mayu のスキャンコード
     const A: Key = Key::plain(0x1e);
@@ -1335,5 +1349,138 @@ mod tests {
         e.set_ime(true, false);
         assert_eq!(e.feed(Input::up(A)), vec![Output::Release(X)]);
         assert_eq!(e.feed(Input::up(H)), vec![Output::Release(H)]);
+    }
+
+    /// `def subst 左辺 = 置き換え先` を 1 つ作る。
+    fn subst(key: Key, mods: ModSpec, edge: EdgeSpec, locks: LockSpec, to: Action) -> Subst {
+        let Action::Key {
+            key: to_key,
+            mods: to_mods,
+            locks: to_locks,
+            ..
+        } = to
+        else {
+            unreachable!()
+        };
+        Subst {
+            key,
+            mods,
+            edge,
+            locks,
+            to_key,
+            to_mods,
+            to_locks,
+        }
+    }
+
+    #[test]
+    fn subst_replaces_the_key_before_the_keymap() {
+        let (mut config, mut global) = base();
+        // def subst *A = *B
+        // def subst *F = C-*H
+        // def subst *X = IC-*Right
+        // key A = X / key B = F / key C-H = BackSpace / key IC-Right = A
+        let any = LockSpec::any();
+        let to = |key, mods, locks| Action::Key {
+            key,
+            mods,
+            edge: EdgeSpec::Both,
+            locks,
+        };
+        config.substs = vec![
+            subst(
+                A,
+                ModSpec::any(),
+                EdgeSpec::Both,
+                any,
+                to(B, ModSpec::any(), any),
+            ),
+            subst(
+                F,
+                ModSpec::any(),
+                EdgeSpec::Both,
+                any,
+                to(H, ModSpec::any().with(BasicMod::Control), any),
+            ),
+            subst(
+                X,
+                ModSpec::any(),
+                EdgeSpec::Both,
+                any,
+                to(RIGHT, ModSpec::any(), any.with(LockMod::ImeComp)),
+            ),
+        ];
+        let d = LockSpec::assign_default();
+        global.assign(A, ModSpec::none(), EdgeSpec::Both, d, vec![Action::key(X)]);
+        global.assign(B, ModSpec::none(), EdgeSpec::Both, d, vec![Action::key(F)]);
+        global.assign(
+            H,
+            ModSpec::none().with(BasicMod::Control),
+            EdgeSpec::Both,
+            d,
+            vec![Action::key(BACK_SPACE)],
+        );
+        global.assign(
+            RIGHT,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            d.with(LockMod::ImeComp),
+            vec![Action::key(A)],
+        );
+        let mut e = engine(config, vec![global]);
+
+        // A は B として引かれる（A の割付は見ない）
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(F)]);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(F)]);
+        // 置き換え先で書いた修飾は、押していなくても押している扱いで引く
+        assert_eq!(e.feed(Input::down(F)), vec![Output::Press(BACK_SPACE)]);
+        assert_eq!(e.feed(Input::up(F)), vec![Output::Release(BACK_SPACE)]);
+        // 鍵も同じ。変換中でなくても変換中として引く
+        assert_eq!(e.feed(Input::down(X)), vec![Output::Press(A)]);
+        assert_eq!(e.feed(Input::up(X)), vec![Output::Release(A)]);
+        // 割付が無ければ置き換えた後のキーを出す。dontcare の修飾は入力のまま
+        assert_eq!(
+            e.feed(Input::down(L_CONTROL)),
+            vec![Output::Press(L_CONTROL)]
+        );
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+        assert_eq!(
+            e.feed(Input::up(L_CONTROL)),
+            vec![Output::Release(L_CONTROL)]
+        );
+    }
+
+    #[test]
+    fn subst_matches_the_left_side_and_releases_by_the_physical_key() {
+        let (mut config, global) = base();
+        // def subst C-A = B
+        // def subst D-H = F
+        let d = LockSpec::assign_default();
+        let c = ModSpec::none().with(BasicMod::Control);
+        config.substs = vec![
+            subst(A, c, EdgeSpec::Both, d, Action::key(B)),
+            subst(H, ModSpec::none(), EdgeSpec::Down, d, Action::key(F)),
+        ];
+        let mut e = engine(config, vec![global]);
+
+        // 左辺の修飾に合わなければ置き換えない
+        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(A)]);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(A)]);
+        // C-A は B（置き換え先は修飾なしなので Control を離して出す）。
+        // Control を先に離しても、離しは押したときの B
+        assert_eq!(
+            e.feed(Input::down(L_CONTROL)),
+            vec![Output::Press(L_CONTROL)]
+        );
+        assert_eq!(
+            e.feed(Input::down(A)),
+            vec![Output::Release(L_CONTROL), Output::Press(B)]
+        );
+        assert_eq!(e.feed(Input::up(L_CONTROL)), vec![]);
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+        // D- の左辺は押しだけ置き換わる。離しは押したときに覚えた F を離す
+        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(F)]);
+        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(F)]);
     }
 }
