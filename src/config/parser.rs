@@ -23,6 +23,7 @@
 //!                                              #        | &PostMessage(宛先, msg, wParam, lParam)
 //!                                              #        | &Variable(mag, inc) | &Repeat(( ACTION... ) | $keyseq名 [, 上限])
 //!                                              #        | &Sync | &ClipboardUpcaseWord | &ClipboardDowncaseWord
+//!                                              #        | &HelpMessage(["タイトル" [, "本文"]]) | &HelpVariable("タイトル")
 //!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）
 //!                                              # NL- CL- SL- KL-（NumLock CapsLock ScrollLock カナ）も書ける
 //! mod MODNAME (=|+=|-=) KEY...
@@ -48,8 +49,8 @@ use std::path::{Path, PathBuf};
 use super::lexer::{Line, Token, tokenize};
 use super::vkeys::vk_by_name;
 use crate::model::{
-    Action, BasicMod, Config, EdgeSpec, EventKind, Func, Gravity, Key, Keymap, KeymapId, LockMod,
-    LockSpec, ModSpec, ScanPrefix, Target, ToWindow, WindowMatch, WindowOp,
+    Action, BasicMod, Config, EdgeSpec, EventKind, Func, Gravity, HelpText, Key, Keymap, KeymapId,
+    LockMod, LockSpec, ModSpec, ScanPrefix, Target, ToWindow, WindowMatch, WindowOp,
 };
 
 /// 最大の include 深さ。循環 include もこれで止まる。
@@ -297,6 +298,20 @@ impl Args<'_> {
                 ));
             }
         })
+    }
+
+    /// 文字列 `"…"`。引用符の無い名前もそのまま文字列にする（default.mayu の
+    /// `&HelpMessage(Mayu, "…")`）。省略時は空。
+    fn string(&self, i: usize) -> Result<String> {
+        match self.args.get(i) {
+            None => Ok(String::new()),
+            Some(Token::Str(s)) | Some(Token::Name(s)) => Ok(s.clone()),
+            Some(t) => self.loader.err(format!(
+                "`&{}`: {} 番目の引数は文字列: `{t}`",
+                self.fname,
+                i + 1
+            )),
+        }
     }
 
     /// 省略時は `Overlapped`。
@@ -1070,6 +1085,35 @@ impl Loader {
                         out.push(self.load_repeat(cur)?);
                         continue;
                     }
+                    if fname.eq_ignore_ascii_case("HelpMessage") {
+                        let args = self.load_args(cur)?;
+                        let a = Args {
+                            fname: &fname,
+                            args: &args,
+                            loader: self,
+                        };
+                        a.no_more(2)?;
+                        let (title, body) = (a.string(0)?, a.string(1)?);
+                        // yamy と同じく、どちらも空なら消す
+                        let text = (!title.is_empty() || !body.is_empty())
+                            .then_some(HelpText { title, body });
+                        out.push(Action::HelpMessage(text));
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("HelpVariable") {
+                        let args = self.load_args(cur)?;
+                        let a = Args {
+                            fname: &fname,
+                            args: &args,
+                            loader: self,
+                        };
+                        a.no_more(1)?;
+                        if args.is_empty() {
+                            return self.err("`&HelpVariable`: 1 番目の引数（文字列）が無い");
+                        }
+                        out.push(Action::HelpVariable(a.string(0)?));
+                        continue;
+                    }
                     if let Some(f) = self.load_func(&fname, cur)? {
                         out.push(Action::Func(f));
                         continue;
@@ -1255,6 +1299,15 @@ impl Loader {
             match cur.next() {
                 Some(Token::Sym(")")) | Some(Token::Sym(",")) => {
                     return self.err("引数が空");
+                }
+                // 並んだ文字列は 1 つにつなぐ（`"…\n" \ 改行 "…"` で長い本文を書く）
+                Some(Token::Str(s)) => {
+                    let mut s = s.clone();
+                    while let Some(Token::Str(more)) = cur.peek() {
+                        s.push_str(more);
+                        cur.next();
+                    }
+                    args.push(Token::Str(s));
                 }
                 Some(t) => args.push(t.clone()),
                 None => return self.err("`)` が無い"),
@@ -1986,6 +2039,47 @@ keymap Sub : Global"
                 Action::Func(Func::ClipboardDowncaseWord)
             ]
         );
+    }
+
+    #[test]
+    fn help_message_and_variable() {
+        let c = load_ok(concat!(
+            "key A = &HelpMessage(\"EmacsEdit C-x-\", \"C-x u\\tundo\")\n",
+            "key B = &HelpMessage &HelpMessage() &HelpMessage(\"\", \"\")\n",
+            "key H = &HelpMessage(\"T\")\n",
+            "key Space = &HelpVariable(\"繰り返し\")\n",
+            // 引用符の無い名前も文字列
+            "key LShift = &HelpMessage(Mayu, \"再読込完了\")\n",
+            // 並んだ文字列は行継続をまたいでもつなぐ
+            "key BS = &HelpMessage(\"KeyMap\", \\\n \" 1 : a\\n\" \\\n \" 2 : b\" \\\n )\n",
+        ));
+        let g = global(&c);
+        let text = |t: &str, b: &str| {
+            Action::HelpMessage(Some(HelpText {
+                title: t.into(),
+                body: b.into(),
+            }))
+        };
+        assert_eq!(
+            only(g, A).actions,
+            vec![text("EmacsEdit C-x-", "C-x u\tundo")]
+        );
+        assert_eq!(only(g, B).actions, vec![Action::HelpMessage(None); 3]);
+        assert_eq!(only(g, H).actions, vec![text("T", "")]);
+        assert_eq!(
+            only(g, SPACE).actions,
+            vec![Action::HelpVariable("繰り返し".into())]
+        );
+        assert_eq!(only(g, LSHIFT).actions, vec![text("Mayu", "再読込完了")]);
+        assert_eq!(only(g, BS).actions, vec![text("KeyMap", " 1 : a\n 2 : b")]);
+    }
+
+    #[test]
+    fn help_errors() {
+        load_err("key A = &HelpMessage(1)");
+        load_err("key A = &HelpMessage(\"a\", \"b\", \"c\")");
+        load_err("key A = &HelpVariable");
+        load_err("key A = &HelpVariable(\"a\", \"b\")");
     }
 
     #[test]

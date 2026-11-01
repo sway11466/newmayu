@@ -451,6 +451,17 @@ pub enum Action {
     /// `&Sync`: ここまでに出したキーがフォーカス窓で処理されるのを待つ。押したときだけ。
     /// コンソール窓では待たない（yamy と同じ）。
     Sync,
+    /// `&HelpMessage([タイトル, 本文])`: 案内の窓を出す。`None`（引数なし）なら消す。押したときだけ。
+    HelpMessage(Option<HelpText>),
+    /// `&HelpVariable(タイトル)`: `&Variable` の値を本文にして案内の窓を出す。押したときだけ。
+    HelpVariable(String),
+}
+
+/// 案内の窓に出す 2 段の文字列。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HelpText {
+    pub title: String,
+    pub body: String,
 }
 
 /// `event 名 = 動作…` の名前。yamy の `Event`。キーマップごとに持つ。

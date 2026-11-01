@@ -8,9 +8,11 @@
 //! - `window` : 窓を操作する `&関数`（`&WindowMove` など）の Win32 側
 //! - `log`    : ログ（時刻付き。標準エラーか `--log` のファイル）
 //! - `ui`     : タスクトレイのアイコンとメニュー
+//! - `help`   : 案内の窓（`&HelpMessage` / `&HelpVariable`。yamy と異なる）
 
 pub mod config;
 pub mod engine;
+pub mod help;
 pub mod log;
 pub mod model;
 pub mod notify;

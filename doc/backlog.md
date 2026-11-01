@@ -26,14 +26,6 @@
 - 対応：(1) `model::Key` を複数スキャンコード対応にする。(2) エンジンに「コードを貯めて定義と照合する」処理を足す。(3) WH_KEYBOARD_LL で Pause がどう届くか（E1-0x1d と 0x45 が順に来るか、0x45 単体か）を実機で測り、フック側の変換を合わせる。(4) パーサーのエラーを外す。
 - 該当：`src/model.rs`・`src/engine.rs`・`src/platform.rs`・`src/config/`。
 
-### feature-4
-
-**&HelpMessage / &HelpVariable（ヘルプ表示）**
-- ゴール：`&HelpMessage(タイトル, 本文)` と `&HelpVariable(タイトル)` を含む `.mayu` が読み込め、押すと yamy と同じく画面に短い案内が出る。
-- 背景：yamy はトレイ付近に小さなツールチップ窓を出し、`&HelpMessage` は引数の文字列を、引数なしなら消す。`&HelpVariable` は `&Variable` の値を本文にして出す。`event prefixed = &HelpMessage(...)` と `event before-key-down = &HelpMessage` の組で、プレフィックス中だけ案内を出す使い方が default.mayu と emacsedit.mayu にある。emacsedit.mayu では EmacsC-U0_9C-U / EmacsC-U0_9 / EmacsC-U の `keymap2` 行がこの関数を既定動作に含むため、読めないとその 3 キーマップが未定義になり、それを参照する行も連鎖して読めない。
-- 対応：(1) パーサーに 2 関数を足す。(2) 本体に案内を出す窓を足し、エンジンの `Func` から表示・消去を頼む。窓の見せ方は spec.md 6 章（yamy と異なる）。板はクリックを素通りさせ、ピンのボタンは別の窓にする（1 枚の窓で `WM_NCHITTEST` に `HTTRANSPARENT` を返す方法は、別のスレッドの窓まで素通りしない）。
-- 該当：`src/config/parser.rs`・`src/model.rs`・`src/window.rs`・本体の UI（新規）。
-
 ### feature-5
 
 **&WindowIdentify / &InvestigateCommand / &LoadSetting（調査・読込の UI）**
@@ -68,6 +60,7 @@
 
 - トレイメニューの「再読込」：押すとログに「再読込: パス」が出て、`.mayu` の変更が効く。
 - 起動できないときのメッセージボックス：存在しない `.mayu` のパスで起こすと、ログと同じ理由がメッセージボックスにも出る。
+- 案内の窓（&HelpMessage / &HelpVariable）：出たとき、ピンを押したときに、フォーカス窓からフォーカスを奪わない。
 
 ## parking lot
 

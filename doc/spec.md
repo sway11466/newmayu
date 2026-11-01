@@ -68,8 +68,8 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | `( 動作… )` | 括りの中を 1 つの動作として扱う（`&Repeat` の引数など） | ○ | |
 | `&関数(引数…)` | 4 章。引数の `( )` は省略できる | ○ | |
 | 関数の前の修飾（`C-&Sync *&WindowMaximize`） | `&Sync` と組むと、関数を実行する間に押しておく / 離しておくモディファイヤを指定できる | × | |
-| 引数置換 `$Clipboard` `$WindowClassName` `$WindowTitleName` | 文字列引数に、実行時のクリップボード / フォーカス窓のクラス名 / タイトルを入れる | × | 文字列引数を取る関数が無い |
-| 文字列 `"…"` のエスケープ | `\a \e \f \n \r \t \v \' \" \\ \cX \xXXXX \0XXXX` | × | 同上 |
+| 引数置換 `$Clipboard` `$WindowClassName` `$WindowTitleName` | 文字列引数に、実行時のクリップボード / フォーカス窓のクラス名 / タイトルを入れる | × | |
+| 文字列 `"…"` のエスケープ | `\a \e \f \n \r \t \v \' \" \\ \cX \xXXXX \0XXXX` | △ | `\n` `\t` `\'` `\"` `\\` のみ。ほかは `\` を外した文字になる |
 
 ## 4. &関数
 
@@ -136,8 +136,8 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 
 | 関数 | yamy の動き | newmayu | 備考 |
 |---|---|---|---|
-| `&HelpMessage([title, message])` | トレイ付近にメッセージを出す。引数なしで消す | × | feature-4。出し方は yamy と異なる（6 章） |
-| `&HelpVariable(title)` | 内部変数の値を title と一緒に出す | × | feature-4。出し方は 6 章 |
+| `&HelpMessage([title, message])` | トレイ付近にメッセージを出す。引数なしで消す | ○ | 出し方は yamy と異なる（6 章） |
+| `&HelpVariable(title)` | 内部変数の値を title と一緒に出す | ○ | 出し方は 6 章 |
 | `&DescribeBindings` | いまのキーマップの割付を表示する | × | |
 | `&InvestigateCommand` | 窓に届く WM_COMMAND / WM_SYSCOMMAND をログに出すモードの切り替え | × | feature-5 |
 | `&LoadSetting([設定名])` | 設定を読み直す | × | feature-5 |

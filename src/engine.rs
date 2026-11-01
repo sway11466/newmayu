@@ -18,8 +18,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::model::{
-    Action, BasicMod, Config, Edge, EdgeSpec, EventKind, Func, Key, KeymapId, LockMod, LockState,
-    ModSpec, ModState,
+    Action, BasicMod, Config, Edge, EdgeSpec, EventKind, Func, HelpText, Key, KeymapId, LockMod,
+    LockState, ModSpec, ModState,
 };
 
 /// フックから届く 1 イベント。
@@ -45,7 +45,7 @@ impl Input {
 }
 
 /// エンジンが OS に出す 1 イベント。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Output {
     Press(Key),
     Release(Key),
@@ -63,6 +63,12 @@ pub enum Output {
     /// `&Sync`: ここまでの出力がフォーカス窓で処理されるまで、以後の出力を待たせる。
     /// 実際に待つのは本体側（同期キーを出し、フック DLL からの通知を待つ）。
     Sync,
+    /// `&HelpMessage` / `&HelpVariable`: 案内の窓を出す。`None` なら消す。
+    /// `hwnd` はそのときのフォーカス窓（その窓がある画面に出す）。
+    Help {
+        hwnd: u64,
+        text: Option<HelpText>,
+    },
 }
 
 /// キーマップ木の探索が戻らないときの上限（yamy と同じ 64）。
@@ -461,6 +467,25 @@ impl Engine {
                     self.out.push(Output::Func {
                         hwnd: self.focus_hwnd,
                         func: *f,
+                    });
+                }
+            }
+            Action::HelpMessage(text) => {
+                if edge == Edge::Down {
+                    self.out.push(Output::Help {
+                        hwnd: self.focus_hwnd,
+                        text: text.clone(),
+                    });
+                }
+            }
+            Action::HelpVariable(title) => {
+                if edge == Edge::Down {
+                    self.out.push(Output::Help {
+                        hwnd: self.focus_hwnd,
+                        text: Some(HelpText {
+                            title: title.clone(),
+                            body: self.variable.to_string(),
+                        }),
                     });
                 }
             }
@@ -873,6 +898,64 @@ mod tests {
         assert_eq!(e.feed(Input::down(H)), vec![Output::Press(H)]);
         e.feed(Input::up(H));
         assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+    }
+
+    #[test]
+    fn help_message_and_variable() {
+        let (config, mut global) = base();
+        let (none, both, any) = (ModSpec::none(), EdgeSpec::Both, LockSpec::any());
+        let text = HelpText {
+            title: "T".into(),
+            body: "B".into(),
+        };
+        global.assign(
+            A,
+            none,
+            both,
+            any,
+            vec![Action::HelpMessage(Some(text.clone()))],
+        );
+        global.assign(B, none, both, any, vec![Action::HelpMessage(None)]);
+        global.assign(
+            H,
+            none,
+            both,
+            any,
+            vec![
+                Action::Variable { mag: 1, inc: 42 },
+                Action::HelpVariable("繰り返し".into()),
+            ],
+        );
+        let mut e = engine(config, vec![global]);
+        e.set_focus(0x1234, "x.exe:A", "");
+        // 押したときだけ出す
+        assert_eq!(
+            e.feed(Input::down(A)),
+            vec![Output::Help {
+                hwnd: 0x1234,
+                text: Some(text)
+            }]
+        );
+        assert_eq!(e.feed(Input::up(A)), vec![]);
+        assert_eq!(
+            e.feed(Input::down(B)),
+            vec![Output::Help {
+                hwnd: 0x1234,
+                text: None
+            }]
+        );
+        e.feed(Input::up(B));
+        // 本文は &Variable の値
+        assert_eq!(
+            e.feed(Input::down(H)),
+            vec![Output::Help {
+                hwnd: 0x1234,
+                text: Some(HelpText {
+                    title: "繰り返し".into(),
+                    body: "42".into()
+                })
+            }]
+        );
     }
 
     #[test]

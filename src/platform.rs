@@ -128,7 +128,7 @@ pub fn send(outputs: &[Output]) {
             Output::Press(k) => keybd_input(*k, false),
             Output::Release(k) => keybd_input(*k, true),
             Output::Vk { vk, extended, up } => Some(vk_input(*vk, *extended, *up)),
-            Output::Func { .. } | Output::Sync => None,
+            Output::Func { .. } | Output::Sync | Output::Help { .. } => None,
         })
         .collect();
     if inputs.is_empty() {

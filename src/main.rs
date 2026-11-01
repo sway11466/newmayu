@@ -40,6 +40,7 @@ use windows::core::HSTRING;
 
 use newmayu::config::parser;
 use newmayu::engine::{Engine, Input, Output};
+use newmayu::help::Help;
 use newmayu::log;
 use newmayu::model::{Config, Key, LockMod};
 use newmayu::notify::{HookDll, Mailslot, SyncShare};
@@ -175,7 +176,7 @@ impl Pressed {
                         self.vks.insert((vk, extended));
                     }
                 }
-                Output::Func { .. } | Output::Sync => {}
+                Output::Func { .. } | Output::Sync | Output::Help { .. } => {}
             }
         }
     }
@@ -223,7 +224,7 @@ fn wait_sync(sync: Option<Key>, rx: &Receiver<Event>, pending: &mut VecDeque<Eve
 }
 
 /// エンジンスレッドの本体。`Quit` で押下中のキーを離して抜ける。
-fn engine_thread(config: Config, rx: Receiver<Event>, sync_share: SyncShare) {
+fn engine_thread(config: Config, rx: Receiver<Event>, sync_share: SyncShare, help: Help) {
     let mut engine = Engine::new(config);
     let mut window_ops = WindowOps::new();
     let mut pressed = Pressed::default();
@@ -261,6 +262,7 @@ fn engine_thread(config: Config, rx: Receiver<Event>, sync_share: SyncShare) {
                     };
                     platform::send(body);
                     window_ops.run(body);
+                    help.run(body);
                     if sync {
                         wait_sync(engine.config().sync, &rx, &mut pending);
                     }
@@ -398,7 +400,12 @@ fn main() -> ExitCode {
         Ok(s) => s,
         Err(e) => return fatal(&e),
     };
-    thread::spawn(move || engine_thread(config, rx, sync_share));
+    // 案内の窓（&HelpMessage）。専用のスレッドで窓を出す
+    let help = match Help::start() {
+        Ok(h) => h,
+        Err(e) => return fatal(&e),
+    };
+    thread::spawn(move || engine_thread(config, rx, sync_share, help));
 
     // フック DLL を各プロセスに入れる
     let hook_dll = match HookDll::install() {
