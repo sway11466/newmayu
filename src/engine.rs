@@ -14,6 +14,7 @@
 //! 押している間に修飾や鍵の状態（IME 変換中など）が変わって別の割付に当たっても、
 //! 押したときに出したキーが離されずに残らないようにするため。
 //! `D-` `U-` 付きの割付は yamy と同じく押しと離しで別々に引く。
+//! `def subst` で引くキーが押しと離しで変わったとき（`def subst D-A = B` など）も yamy と同じく引き直す。
 
 use std::collections::{HashMap, HashSet};
 
@@ -250,10 +251,11 @@ impl Engine {
             cur.locks = s.to_locks.apply(self.locks);
             cur.event_mods = s.to_mods.add(event_mods);
         }
-        // 離しは、押したときに覚えた動作列があればそれを使う
+        // 離しは、押したときに覚えた動作列があればそれを使う。
+        // ただし def subst で引くキーが押したときと変わったら、yamy と同じく引き直す
         let held = match edge {
             Edge::Down => None,
-            Edge::Up => self.held.remove(&key),
+            Edge::Up => self.held.remove(&key).filter(|h| h.cur.key == cur.key),
         };
         if edge == Edge::Down {
             self.generate_event(EventKind::BeforeKeyDown, keymap_id, cur, 0);
@@ -1452,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn subst_matches_the_left_side_and_releases_by_the_physical_key() {
+    fn subst_is_looked_up_again_on_release() {
         let (mut config, global) = base();
         // def subst C-A = B
         // def subst D-H = F
@@ -1467,8 +1469,10 @@ mod tests {
         // 左辺の修飾に合わなければ置き換えない
         assert_eq!(e.feed(Input::down(A)), vec![Output::Press(A)]);
         assert_eq!(e.feed(Input::up(A)), vec![Output::Release(A)]);
+        // 以下、X を押したままにして「物理キーが全部離れたら全部離す」が効かないようにする。
         // C-A は B（置き換え先は修飾なしなので Control を離して出す）。
-        // Control を先に離しても、離しは押したときの B
+        // Control を先に離すと、A の離しは置き換わらず A として引かれ、B は離されない（yamy と同じ）
+        assert_eq!(e.feed(Input::down(X)), vec![Output::Press(X)]);
         assert_eq!(
             e.feed(Input::down(L_CONTROL)),
             vec![Output::Press(L_CONTROL)]
@@ -1478,9 +1482,18 @@ mod tests {
             vec![Output::Release(L_CONTROL), Output::Press(B)]
         );
         assert_eq!(e.feed(Input::up(L_CONTROL)), vec![]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
-        // D- の左辺は押しだけ置き換わる。離しは押したときに覚えた F を離す
+        assert_eq!(e.feed(Input::up(A)), vec![]);
+        assert_eq!(
+            e.feed(Input::up(X)),
+            vec![Output::Release(X), Output::Release(B)]
+        );
+        // D- の左辺は押しだけ置き換わる。離しは H として引かれ、F は離されない
+        assert_eq!(e.feed(Input::down(X)), vec![Output::Press(X)]);
         assert_eq!(e.feed(Input::down(H)), vec![Output::Press(F)]);
-        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(F)]);
+        assert_eq!(e.feed(Input::up(H)), vec![]);
+        assert_eq!(
+            e.feed(Input::up(X)),
+            vec![Output::Release(X), Output::Release(F)]
+        );
     }
 }
