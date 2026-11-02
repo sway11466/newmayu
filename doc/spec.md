@@ -19,7 +19,7 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | `include "ファイル"` | その場にファイルを挿入する。ホームディレクトリ（yamy は exe のあるフォルダ）から探す | △ | 読んでいるファイルの場所からの相対パスで探す |
 | `define シンボル` | 条件分岐のシンボルを定義する。yamy では設定ダイアログの `-Dシンボル` でも定義できる | ○ | コマンドラインからの定義は無い |
 | `if ( [!] シンボル )` … `else` … `endif` | シンボルの有無で読む範囲を切り替える。`elseif` / `elsif` / `elif` / `or` が else-if、`and` が入れ子の if | ○ | |
-| `def key 名前… = [E0-\|E1-]スキャンコード…` | 物理キーを定義する。スキャンコードは複数並べられる（`def key Pause = E1-0x1d 0x45`） | ○ | E1 のキー（Pause）は置き換えられない（yamy と同じ）。mayu はキーボードドライバ（mayud）から E1 付きのスキャンコードを受けていたので置き換えられた。yamy と newmayu は WH_KEYBOARD_LL で受け、E1 が届かない（実機では Pause が 0x45 と E0-0x45 で届いた）。yamy の readme は Scancode Map との併用を勧めている |
+| `def key 名前… = [E0-\|E1-]スキャンコード…` | 物理キーを定義する。スキャンコードは複数並べられる（`def key Pause = E1-0x1d 0x45`）。定義に無いキーは捨てる（押しても何も出ない） | ○ | E1 のキー（Pause）は置き換えられない（yamy と同じ）。mayu はキーボードドライバ（mayud）から E1 付きのスキャンコードを受けていたので置き換えられた。yamy と newmayu は WH_KEYBOARD_LL で受け、E1 が届かない（実機では Pause が 0x45 と E0-0x45 で届いた）。yamy の readme は Scancode Map との併用を勧めている |
 | `def mod (shift\|alt\|control\|windows) = キー名…` | 物理モディファイヤキーを定義する。alt は meta / menu、control は ctrl、windows は win とも書ける | ○ | |
 | `def sync = スキャンコード` | `&Sync` で Windows に送るキー | ○ | |
 | `def alias 別名 = キー名` | キーの別名。既存のキー名と同じなら別名が勝つ | ○ | |

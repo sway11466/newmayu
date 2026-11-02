@@ -14,6 +14,7 @@
 //! 押している間に修飾や鍵の状態（IME 変換中など）が変わって別の割付に当たっても、
 //! 押したときに出したキーが離されずに残らないようにするため。
 //! `D-` `U-` 付きの割付は yamy と同じく押しと離しで別々に引く。
+//! `def key` に無いキーは yamy と同じく捨てる。
 //! `def subst` で引くキーが押しと離しで変わったとき（`def subst D-A = B` など）も yamy と同じく引き直す。
 
 use std::collections::{HashMap, HashSet};
@@ -225,6 +226,11 @@ impl Engine {
             self.pending = Some(input);
             return Vec::new();
         }
+        // def key に無いキーは捨て、押しているキーにも数えない（yamy の undefined key）
+        if !self.config.keys.contains(&input.key) {
+            self.release_all_if_idle();
+            return std::mem::take(&mut self.out);
+        }
 
         let Input { key, edge } = input;
         match edge {
@@ -267,18 +273,22 @@ impl Engine {
             self.generate_with_prefix(key, edge, own_mod, state, event_mods);
         }
 
-        // 物理キーが全部離れたら、OS 側に残した修飾とキーも全部離す。
-        if self.pressed.is_empty() {
-            self.generate_modifier_events(ModSpec::none());
-            let mut rest: Vec<Key> = self.win32_pressed.drain().collect();
-            rest.sort();
-            for k in rest {
-                self.out.push(Output::Release(k));
-            }
-            self.one_shot = None;
-        }
-
+        self.release_all_if_idle();
         std::mem::take(&mut self.out)
+    }
+
+    /// 物理キーが全部離れたら、OS 側に残した修飾とキーも全部離す。
+    fn release_all_if_idle(&mut self) {
+        if !self.pressed.is_empty() {
+            return;
+        }
+        self.generate_modifier_events(ModSpec::none());
+        let mut rest: Vec<Key> = self.win32_pressed.drain().collect();
+        rest.sort();
+        for k in rest {
+            self.out.push(Output::Release(k));
+        }
+        self.one_shot = None;
     }
 
     /// `&Prefix` の前後処理をして 1 キーを出す。
@@ -657,9 +667,12 @@ mod tests {
 
     const GLOBAL: KeymapId = KeymapId(0);
 
-    /// `def mod Control = LControl RControl` と、それを継承した Global キーマップ。
+    /// テストで使うキーの `def key` と `def mod Control = LControl RControl`、それを継承した Global キーマップ。
     fn base() -> (Config, Keymap) {
         let mut config = Config::new(Vec::new());
+        config.keys = vec![
+            A, B, F, H, X, BACK_SPACE, CAPS_LOCK, L_CONTROL, R_CONTROL, RIGHT, L_WIN,
+        ];
         config.def_mod(BasicMod::Control, [L_CONTROL, R_CONTROL]);
         let mut global = Keymap::global();
         global.add_mod_key(BasicMod::Control, L_CONTROL);
@@ -727,8 +740,30 @@ mod tests {
             e.feed(Input::up(L_CONTROL)),
             vec![Output::Release(L_CONTROL)]
         );
-        assert_eq!(e.feed(Input::down(k45)), vec![Output::Press(k45)]);
-        assert_eq!(e.feed(Input::up(k45)), vec![Output::Release(k45)]);
+        // def key に無いキーは捨てる（yamy と同じ）
+        assert_eq!(e.feed(Input::down(k45)), vec![]);
+        assert_eq!(e.feed(Input::up(k45)), vec![]);
+    }
+
+    #[test]
+    fn undefined_key_is_dropped() {
+        let (config, global) = base();
+        let mut e = engine(config, vec![global]);
+        let undefined = Key::plain(0x45);
+
+        assert_eq!(e.feed(Input::down(undefined)), vec![]);
+        assert_eq!(e.feed(Input::up(undefined)), vec![]);
+        // 押しているキーの数にも数えない
+        assert_eq!(
+            e.feed(Input::down(L_CONTROL)),
+            vec![Output::Press(L_CONTROL)]
+        );
+        assert_eq!(e.feed(Input::down(undefined)), vec![]);
+        assert_eq!(
+            e.feed(Input::up(L_CONTROL)),
+            vec![Output::Release(L_CONTROL)]
+        );
+        assert_eq!(e.feed(Input::up(undefined)), vec![]);
     }
 
     const L_WIN: Key = Key::e0(0x5b);
@@ -814,6 +849,15 @@ mod tests {
         assert_eq!(e.feed(Input::up(L_WIN)), vec![Output::Release(L_WIN)]);
         // 挟んだ記録は次に持ち越さない
         assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(
+            e.feed(Input::up(L_WIN)),
+            vec![Output::Press(L_WIN), Output::Release(L_WIN)]
+        );
+        // def key に無いキーは挟んでも取り消さない（yamy と同じ）
+        let undefined = Key::plain(0x45);
+        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(e.feed(Input::down(undefined)), vec![]);
+        assert_eq!(e.feed(Input::up(undefined)), vec![]);
         assert_eq!(
             e.feed(Input::up(L_WIN)),
             vec![Output::Press(L_WIN), Output::Release(L_WIN)]
