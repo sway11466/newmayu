@@ -153,8 +153,9 @@ impl SyncShare {
     /// 同期キーを書く（設定の再読込で変わったとき用）。`None` なら「無し」。
     pub fn set(&self, key: Option<Key>) {
         let mut buf = [0u8; SYNC_SHARE_SIZE];
-        if let Some(k) = key {
-            write_sync_share(&mut buf, u32::from(k.code), k.prefix != ScanPrefix::None);
+        // `def sync` のスキャンコードは 1 個（パーサーが 1 個だけ読む）
+        if let Some(sc) = key.map(|k| k.codes()[0]) {
+            write_sync_share(&mut buf, u32::from(sc.code), sc.prefix != ScanPrefix::None);
         }
         // SAFETY: view は SYNC_SHARE_SIZE バイトの書ける領域。
         unsafe { (self.view.Value as *mut [u8; SYNC_SHARE_SIZE]).write_volatile(buf) };

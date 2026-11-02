@@ -134,6 +134,9 @@ pub struct Engine {
     win32_pressed: HashSet<Key>,
     /// `&Variable` が変え、`&Repeat` が回数に使う値（yamy の `m_variable`）。
     variable: i32,
+    /// 複数スキャンコードのキーの組み立て途中（yamy の `keyboardHandler` の `key`）。
+    /// 押し・離しは最初のスキャンコードのもの。
+    pending: Option<Input>,
     out: Vec<Output>,
 }
 
@@ -150,6 +153,7 @@ impl Engine {
             current,
             is_prefix: false,
             variable: 0,
+            pending: None,
             pressed: HashSet::new(),
             held: HashMap::new(),
             locks: LockState::empty(),
@@ -201,6 +205,24 @@ impl Engine {
 
     /// 1 イベントを処理し、OS に出すイベント列を返す。
     pub fn feed(&mut self, input: Input) -> Vec<Output> {
+        // 複数スキャンコードのキー: 届いたスキャンコードを貯め、定義の先頭部分に一致するうちは
+        // 何も出さずに次を待つ（yamy の searchKey / searchPrefixKey）
+        let input = match self.pending.take() {
+            Some(p) => Input {
+                // 待つのは定義（4 個まで）の先頭部分のときだけなので、足しても 4 個を超えない
+                key: p
+                    .key
+                    .concat(input.key)
+                    .expect("組み立て途中のキーは定義より短い"),
+                edge: p.edge,
+            },
+            None => input,
+        };
+        if self.config.waits_for_more(input.key) {
+            self.pending = Some(input);
+            return Vec::new();
+        }
+
         let Input { key, edge } = input;
         match edge {
             Edge::Down => {
@@ -280,7 +302,7 @@ impl Engine {
         if self.pressed.is_empty() {
             self.generate_modifier_events(ModSpec::none());
             let mut rest: Vec<Key> = self.win32_pressed.drain().collect();
-            rest.sort_by_key(|k| (k.prefix as u8, k.code));
+            rest.sort();
             for k in rest {
                 self.out.push(Output::Release(k));
             }
@@ -577,7 +599,9 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Action, EventKind, Keymap, LockSpec, Subst, WindowMatch, WindowOp};
+    use crate::model::{
+        Action, EventKind, Keymap, LockSpec, ScanCode, ScanPrefix, Subst, WindowMatch, WindowOp,
+    };
 
     // 109.mayu のスキャンコード
     const A: Key = Key::plain(0x1e);
@@ -622,6 +646,49 @@ mod tests {
 
         assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
         assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+    }
+
+    /// `def key Pause = E1-0x1d 0x45`
+    fn pause() -> Key {
+        Key::from_codes(&[
+            ScanCode::new(ScanPrefix::E1, 0x1d),
+            ScanCode::new(ScanPrefix::None, 0x45),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn multi_scan_code_key_waits_for_the_rest() {
+        let (mut config, mut global) = base();
+        config.keys = vec![A, L_CONTROL, pause()];
+        // key Pause = B
+        global.assign(
+            pause(),
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::key(B)],
+        );
+        let mut e = engine(config, vec![global]);
+        let e1_1d = Key::new(ScanPrefix::E1, 0x1d);
+        let k45 = Key::plain(0x45);
+
+        // 定義の先頭部分に一致するうちは何も出さずに待ち、揃ったら 1 キーとして引く
+        assert_eq!(e.feed(Input::down(e1_1d)), vec![]);
+        assert_eq!(e.feed(Input::down(k45)), vec![Output::Press(B)]);
+        assert_eq!(e.feed(Input::up(e1_1d)), vec![]);
+        assert_eq!(e.feed(Input::up(k45)), vec![Output::Release(B)]);
+        // 先頭部分でないキーは待たない
+        assert_eq!(
+            e.feed(Input::down(L_CONTROL)),
+            vec![Output::Press(L_CONTROL)]
+        );
+        assert_eq!(
+            e.feed(Input::up(L_CONTROL)),
+            vec![Output::Release(L_CONTROL)]
+        );
+        assert_eq!(e.feed(Input::down(k45)), vec![Output::Press(k45)]);
+        assert_eq!(e.feed(Input::up(k45)), vec![Output::Release(k45)]);
     }
 
     #[test]

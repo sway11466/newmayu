@@ -46,28 +46,36 @@ pub fn input_from_hook(k: &KBDLLHOOKSTRUCT, test_mark: Option<usize>) -> Option<
     })
 }
 
-fn keybd_input(key: Key, up: bool) -> Option<INPUT> {
-    let mut flags: KEYBD_EVENT_FLAGS = KEYEVENTF_SCANCODE;
-    match key.prefix {
-        ScanPrefix::None => {}
-        ScanPrefix::E0 => flags |= KEYEVENTF_EXTENDEDKEY,
-        ScanPrefix::E1 => return None,
+/// キーのスキャンコードを順に出す（yamy の `generateKeyEvent`）。
+/// `SendInput` は E1 前置を出せないので、E1 を含むキーは出さない。
+fn keybd_inputs(key: Key, up: bool) -> Vec<INPUT> {
+    if key.codes().iter().any(|sc| sc.prefix == ScanPrefix::E1) {
+        return Vec::new();
     }
-    if up {
-        flags |= KEYEVENTF_KEYUP;
-    }
-    Some(INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(0),
-                wScan: key.code as u16,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    })
+    key.codes()
+        .iter()
+        .map(|sc| {
+            let mut flags: KEYBD_EVENT_FLAGS = KEYEVENTF_SCANCODE;
+            if sc.prefix == ScanPrefix::E0 {
+                flags |= KEYEVENTF_EXTENDEDKEY;
+            }
+            if up {
+                flags |= KEYEVENTF_KEYUP;
+            }
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VIRTUAL_KEY(0),
+                        wScan: sc.code as u16,
+                        dwFlags: flags,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            }
+        })
+        .collect()
 }
 
 /// `&VK` の出力。マウスボタンはマウス入力、それ以外は仮想キーコードのキー入力
@@ -124,11 +132,11 @@ fn vk_input(vk: u8, extended: bool, up: bool) -> INPUT {
 pub fn send(outputs: &[Output]) {
     let inputs: Vec<INPUT> = outputs
         .iter()
-        .filter_map(|o| match o {
-            Output::Press(k) => keybd_input(*k, false),
-            Output::Release(k) => keybd_input(*k, true),
-            Output::Vk { vk, extended, up } => Some(vk_input(*vk, *extended, *up)),
-            Output::Func { .. } | Output::Sync | Output::Help { .. } => None,
+        .flat_map(|o| match o {
+            Output::Press(k) => keybd_inputs(*k, false),
+            Output::Release(k) => keybd_inputs(*k, true),
+            Output::Vk { vk, extended, up } => vec![vk_input(*vk, *extended, *up)],
+            Output::Func { .. } | Output::Sync | Output::Help { .. } => Vec::new(),
         })
         .collect();
     if inputs.is_empty() {

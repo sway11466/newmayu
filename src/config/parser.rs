@@ -6,7 +6,7 @@
 //! include "file"
 //! define SYMBOL
 //! if ( [!] SYMBOL ) [文] / and ( [!] SYMBOL ) / else [文] / elseif ( [!] SYMBOL ) / endif
-//! def key NAME... = [E0-|E1-]SCANCODE          # NAME を ( ) で囲む形も可。スキャンコードは 1 個
+//! def key NAME... = [E0-|E1-]SCANCODE...       # NAME を ( ) で囲む形も可。スキャンコードは 4 個まで
 //! def mod (shift|alt|control|windows) = KEY...
 //! def alias NAME = KEY
 //! def sync = SCANCODE                          # &Sync で出す同期キー
@@ -36,7 +36,7 @@
 //! `U-` `D-` は押し・離しの区別（両方または無指定なら両方）。
 //! 未指定の `IC-` は「変換中でない」を要求し（yamy の既定）、`IL-` は dontcare。
 //!
-//! これ以外（`def option`、上記以外の `&関数`、`!`/`!!`/`!!!`、R- MAX- 等の割当修飾、2 個以上のスキャンコード）は
+//! これ以外（`def option`、上記以外の `&関数`、`!`/`!!`/`!!!`、R- MAX- 等の割当修飾）は
 //! エラーにする。
 //!
 //! ファイルの文字コードは UTF-8（BOM の有無は問わない）か CP932。UTF-8 として正しければ UTF-8、
@@ -51,7 +51,8 @@ use super::lexer::{Line, Token, tokenize};
 use super::vkeys::vk_by_name;
 use crate::model::{
     Action, BasicMod, Config, EdgeSpec, EventKind, Func, Gravity, HelpText, Key, Keymap, KeymapId,
-    LockMod, LockSpec, ModSpec, ScanPrefix, Subst, Target, ToWindow, WindowMatch, WindowOp,
+    LockMod, LockSpec, ModSpec, ScanCode, ScanPrefix, Subst, Target, ToWindow, WindowMatch,
+    WindowOp,
 };
 
 /// 最大の include 深さ。循環 include もこれで止まる。
@@ -642,7 +643,8 @@ impl Loader {
             "alias" => self.load_def_alias(cur),
             "sync" => {
                 self.expect_sym(cur, "=")?;
-                self.sync = Some(self.load_scan_code(cur)?);
+                let sc = self.load_scan_code(cur)?;
+                self.sync = Some(Key::new(sc.prefix, sc.code));
                 self.expect_end(cur)
             }
             "subst" => self.load_def_subst(cur),
@@ -722,10 +724,15 @@ impl Loader {
         if names.is_empty() {
             return self.err("キー名が無い");
         }
-        let key = self.load_scan_code(cur)?;
-        if !cur.at_end() {
-            return self.err("スキャンコードが 2 個以上のキーは未対応（backlog feature-2）");
+        // yamy の load_SCAN_CODES と同じく、行末か 4 個まで読む
+        let mut codes = Vec::new();
+        while !cur.at_end() && codes.len() < Key::MAX_SCAN_CODES {
+            codes.push(self.load_scan_code(cur)?);
         }
+        self.expect_end(cur)?;
+        let Some(key) = Key::from_codes(&codes) else {
+            return self.err("スキャンコードが無い");
+        };
         let idx = self.keys.len();
         for n in &names {
             let l = lower(n);
@@ -739,7 +746,7 @@ impl Loader {
     }
 
     /// `[E0-|E1-] NUMBER`
-    fn load_scan_code(&mut self, cur: &mut Cur) -> Result<Key> {
+    fn load_scan_code(&mut self, cur: &mut Cur) -> Result<ScanCode> {
         let mut prefix = ScanPrefix::None;
         loop {
             match cur.next() {
@@ -747,7 +754,7 @@ impl Loader {
                     let Ok(code) = u8::try_from(*n) else {
                         return self.err(format!("スキャンコード {text} が 0..=0xff の外"));
                     };
-                    return Ok(Key::new(prefix, code));
+                    return Ok(ScanCode::new(prefix, code));
                 }
                 Some(Token::Sym("E0-")) => prefix = ScanPrefix::E0,
                 Some(Token::Sym("E1-")) => prefix = ScanPrefix::E1,
@@ -1578,6 +1585,7 @@ impl Loader {
         for (i, keys) in self.def_mods.iter().enumerate() {
             config.def_mod(BasicMod::ALL[i], keys.iter().copied());
         }
+        config.keys = self.keys;
         config.sync = self.sync;
         config.substs = self.substs;
         Ok(config)
@@ -2393,11 +2401,29 @@ keymap Sub : Global"
     }
 
     #[test]
+    fn def_key_with_multiple_scan_codes() {
+        let c = load_ok("def key Pause = E1-0x1d 0x45\nkey Pause = A");
+        let pause = Key::from_codes(&[
+            ScanCode::new(ScanPrefix::E1, 0x1d),
+            ScanCode::new(ScanPrefix::None, 0x45),
+        ])
+        .unwrap();
+        assert_eq!(
+            only(global(&c), pause).actions,
+            vec![Action::key_with(A, base())]
+        );
+        assert!(c.keys.contains(&pause));
+        assert!(c.keys.contains(&A));
+        // yamy と同じく最大 4 個
+        load_ok("def key Foo = 0x01 0x02 0x03 0x04");
+        load_err("def key Foo = 0x01 0x02 0x03 0x04 0x05");
+    }
+
+    #[test]
     fn errors() {
-        let e = load_err("def key Pause = E1-0x1d 0x45");
-        assert!(e.message.contains("2 個以上"), "{e}");
+        let e = load_err("key Z = A");
+        assert!(e.message.contains("未定義"));
         assert_eq!(e.line, KEYS.lines().count() + 1);
-        assert!(load_err("key Z = A").message.contains("未定義"));
         assert!(
             load_err("key A = &WindowMonitor(1)")
                 .message

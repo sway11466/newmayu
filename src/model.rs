@@ -9,7 +9,7 @@
 use regex::{Regex, RegexBuilder};
 
 /// スキャンコードの前置バイト。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ScanPrefix {
     None,
     E0,
@@ -17,22 +17,80 @@ pub enum ScanPrefix {
     E1,
 }
 
-/// 物理キー。前置バイトとスキャンコードの組で同一性を取る。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Key {
+/// スキャンコード 1 個。前置バイトとコードの組。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ScanCode {
     pub prefix: ScanPrefix,
     pub code: u8,
 }
 
-impl Key {
+impl ScanCode {
     pub const fn new(prefix: ScanPrefix, code: u8) -> Self {
-        Key { prefix, code }
+        ScanCode { prefix, code }
+    }
+}
+
+/// 物理キー。スキャンコードの列で同一性を取る。たいていは 1 個、Pause は
+/// `E1-0x1d 0x45` の 2 個。最大 4 個（yamy の `Key::MAX_SCAN_CODES_SIZE`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Key {
+    /// 先頭 `len` 個が使われる。残りは `ScanCode::new(ScanPrefix::None, 0)` で埋めて、
+    /// 導出した比較が列の比較と一致するようにする。
+    codes: [ScanCode; Key::MAX_SCAN_CODES],
+    len: u8,
+}
+
+impl Key {
+    pub const MAX_SCAN_CODES: usize = 4;
+
+    const EMPTY: ScanCode = ScanCode::new(ScanPrefix::None, 0);
+
+    /// スキャンコード 1 個のキー。
+    pub const fn new(prefix: ScanPrefix, code: u8) -> Self {
+        Key {
+            codes: [
+                ScanCode::new(prefix, code),
+                Key::EMPTY,
+                Key::EMPTY,
+                Key::EMPTY,
+            ],
+            len: 1,
+        }
     }
     pub const fn plain(code: u8) -> Self {
         Key::new(ScanPrefix::None, code)
     }
     pub const fn e0(code: u8) -> Self {
         Key::new(ScanPrefix::E0, code)
+    }
+
+    /// スキャンコードの列のキー。1〜4 個でなければ `None`。
+    pub fn from_codes(codes: &[ScanCode]) -> Option<Self> {
+        if codes.is_empty() || codes.len() > Key::MAX_SCAN_CODES {
+            return None;
+        }
+        let mut key = Key {
+            codes: [Key::EMPTY; Key::MAX_SCAN_CODES],
+            len: codes.len() as u8,
+        };
+        key.codes[..codes.len()].copy_from_slice(codes);
+        Some(key)
+    }
+
+    pub fn codes(&self) -> &[ScanCode] {
+        &self.codes[..self.len as usize]
+    }
+
+    /// 後ろに `other` のスキャンコードを足したキー。4 個を超えるなら `None`。
+    pub fn concat(&self, other: Key) -> Option<Key> {
+        let mut codes = self.codes().to_vec();
+        codes.extend_from_slice(other.codes());
+        Key::from_codes(&codes)
+    }
+
+    /// `prefix` のスキャンコードの列がこのキーの先頭部分か（yamy の `Key::isPrefixScanCode`）。
+    pub fn starts_with(&self, prefix: Key) -> bool {
+        self.codes().starts_with(prefix.codes())
     }
 }
 
@@ -800,6 +858,8 @@ impl Keymap {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub keymaps: Vec<Keymap>,
+    /// `def key` で定義したキー。複数スキャンコードのキーを入力から組み立てるときに照合する。
+    pub keys: Vec<Key>,
     /// `def mod Control = LControl RControl`。出力側で修飾を押す／離すときに使う物理キー。
     /// Shift / Alt / Control / Windows のみ。Mod0〜9 は出力されない。
     pub def_mods: [Vec<Key>; BasicMod::ALL.len()],
@@ -813,10 +873,17 @@ impl Config {
     pub fn new(keymaps: Vec<Keymap>) -> Self {
         Config {
             keymaps,
+            keys: Vec::new(),
             def_mods: Default::default(),
             sync: None,
             substs: Vec::new(),
         }
+    }
+
+    /// `key` が定義済みのキーではなく、定義済みのキーの先頭部分になっている
+    /// （続きのスキャンコードを待つ）か。yamy の `searchKey` が外れて `searchPrefixKey` が当たる場合。
+    pub fn waits_for_more(&self, key: Key) -> bool {
+        !self.keys.contains(&key) && self.keys.iter().any(|k| k.starts_with(key))
     }
 
     /// 入力に合う `def subst` を探す（yamy の `Keyboard::searchSubstitute`）。
