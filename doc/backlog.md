@@ -42,14 +42,6 @@
 - 対応：TSF の `ITfThreadMgr` / `ITfContext` の状態を DLL の中から読む、または `ITfUIElementSink` 系の通知を受ける方法を調べ、取れる方法で DLL に足す。
 - 該当：`hook/src/lib.rs`・`ipc/src/lib.rs`。
 
-### feature-9
-
-**One Shot モディファイヤ（`mod … = !!キー`）**
-- ゴール：`mod win = !!LWin` のように `!!` を付けたモディファイヤキーが、yamy と同じく単独で押して離したときにそのキーとして働く。
-- 背景：オーナーの Global.mayu が Win キーに使う。yamy には `!`（真のモディファイヤ）・`!!`（One Shot）・`!!!`（One Shot＋リピート）がある。いまは読み込みエラーにしている。
-- 対応：(1) パーサーで `!!` を読む。(2) エンジンで、押してから離すまでに他のキーが無かったかを見て、無ければそのキーの動作を出す。
-- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
-
 ### feature-10
 
 **&MouseWheel**
@@ -93,7 +85,6 @@
 - トレイメニューの「再読込」：押すとログに「再読込: パス」が出て、`.mayu` の変更が効く。
 - 起動できないときのメッセージボックス：存在しない `.mayu` のパスで起こすと、ログと同じ理由がメッセージボックスにも出る。
 - 案内の窓（&HelpMessage / &HelpVariable）：出たとき、ピンを押したときに、フォーカス窓からフォーカスを奪わない。
-- 複数スキャンコードのキー（`def key Pause = E1-0x1d 0x45`）：Pause を押すと割付どおりに動く。WH_KEYBOARD_LL で Pause がどう届くか（E1-0x1d と 0x45 が順に来るか、0x45 単体か）を測り、違えばフック側の変換（`src/platform.rs` の `input_from_hook`）を合わせる。
 
 ## parking lot
 

@@ -19,7 +19,7 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | `include "ファイル"` | その場にファイルを挿入する。ホームディレクトリ（yamy は exe のあるフォルダ）から探す | △ | 読んでいるファイルの場所からの相対パスで探す |
 | `define シンボル` | 条件分岐のシンボルを定義する。yamy では設定ダイアログの `-Dシンボル` でも定義できる | ○ | コマンドラインからの定義は無い |
 | `if ( [!] シンボル )` … `else` … `endif` | シンボルの有無で読む範囲を切り替える。`elseif` / `elsif` / `elif` / `or` が else-if、`and` が入れ子の if | ○ | |
-| `def key 名前… = [E0-\|E1-]スキャンコード…` | 物理キーを定義する。スキャンコードは複数並べられる（`def key Pause = E1-0x1d 0x45`） | ○ | yamy の readme は「E1 プレフィックスのキー（Pause）は置き換えられない」としている |
+| `def key 名前… = [E0-\|E1-]スキャンコード…` | 物理キーを定義する。スキャンコードは複数並べられる（`def key Pause = E1-0x1d 0x45`） | ○ | E1 のキー（Pause）は置き換えられない（yamy と同じ）。mayu はキーボードドライバ（mayud）から E1 付きのスキャンコードを受けていたので置き換えられた。yamy と newmayu は WH_KEYBOARD_LL で受け、E1 が届かない（実機では Pause が 0x45 と E0-0x45 で届いた）。yamy の readme は Scancode Map との併用を勧めている |
 | `def mod (shift\|alt\|control\|windows) = キー名…` | 物理モディファイヤキーを定義する。alt は meta / menu、control は ctrl、windows は win とも書ける | ○ | |
 | `def sync = スキャンコード` | `&Sync` で Windows に送るキー | ○ | |
 | `def alias 別名 = キー名` | キーの別名。既存のキー名と同じなら別名が勝つ | ○ | |
@@ -36,7 +36,7 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | `key 修飾キー… = 動作…` | 割付。左側は複数のキーを並べられる（同じ動作を割り付ける） | ○ | |
 | `key 修飾… =` | 既定修飾の変更（`key *IC- =` でこれ以降の `IC-` を dontcare にする）。複数変えるときは 1 行に書く | × | |
 | `event prefixed \| before-key-down \| after-key-up = 動作…` | イベントが起きたときの動作。キーマップごとで、親のものは見ない | ○ | |
-| `mod モディファイヤ (=\|+=\|-=) [!\|!!\|!!!]キー名…` | キーマップごとにモディファイヤキーを変える。親から引き継ぐ。名前は shift / alt / control / windows / mod0〜mod9 | △ | `!`（真のモディファイヤ）`!!`（One Shot、SandS）`!!!`（One Shot＋リピート）は未対応 |
+| `mod モディファイヤ (=\|+=\|-=) [!\|!!\|!!!]キー名…` | キーマップごとにモディファイヤキーを変える。親から引き継ぐ。名前は shift / alt / control / windows / mod0〜mod9 | △ | `!!`（One Shot、SandS）は対応。`!`（真のモディファイヤ）`!!!`（One Shot＋リピート）は未対応 |
 | `mod !モディファイヤ` / `mod !!モディファイヤ` | そのモディファイヤに割り当てた全キーを真 / One Shot にする | × | |
 | `keyseq $名前 = 動作…` | 動作列に名前を付ける。使う側で展開される | ○ | |
 

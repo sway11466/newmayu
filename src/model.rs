@@ -743,7 +743,8 @@ pub struct Assignment {
 /// `keymap 名 : 親` / `window 名 /re/ : 親` の 1 つ。
 ///
 /// `mod_keys` は読み込み時に親から継承・加減算を済ませた結果（yamy の `Keymap::adjustModifier`）。
-/// エンジンは現在のキーマップの `mod_keys` だけを見る。
+/// エンジンは現在のキーマップの `mod_keys` だけを見る。`one_shot_keys` は `mod_keys` のうち
+/// `!!` を付けたもの（yamy の `AM_oneShot`）。
 ///
 /// `window` が `Some` のキーマップは、前景窓が条件に合うとき自動で選ばれる。
 /// `None` のキーマップ（`keymap`）は親や `&Prefix` 経由でしか使われない。
@@ -755,6 +756,7 @@ pub struct Keymap {
     pub window: Option<WindowMatch>,
     pub default_actions: Vec<Action>,
     pub mod_keys: [Vec<Key>; BasicMod::ALL.len()],
+    pub one_shot_keys: [Vec<Key>; BasicMod::ALL.len()],
     pub assignments: Vec<Assignment>,
     /// `event 名 = 動作…`。
     pub events: [Option<Vec<Action>>; EventKind::ALL.len()],
@@ -769,6 +771,7 @@ impl Keymap {
             window: None,
             default_actions: vec![Action::KeymapParent],
             mod_keys: Default::default(),
+            one_shot_keys: Default::default(),
             assignments: Vec::new(),
             events: Default::default(),
         }
@@ -786,6 +789,15 @@ impl Keymap {
     /// `mod control += 英数`
     pub fn add_mod_key(&mut self, m: BasicMod, key: Key) {
         let keys = &mut self.mod_keys[m.index()];
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+
+    /// `mod win = !!LWin`
+    pub fn add_one_shot_mod_key(&mut self, m: BasicMod, key: Key) {
+        self.add_mod_key(m, key);
+        let keys = &mut self.one_shot_keys[m.index()];
         if !keys.contains(&key) {
             keys.push(key);
         }
@@ -837,6 +849,11 @@ impl Keymap {
         BasicMod::ALL
             .into_iter()
             .find(|m| self.mod_keys[m.index()].contains(&key))
+    }
+
+    /// このキーが修飾 `m` の `!!` 付きの修飾キーか。
+    pub fn is_one_shot(&self, m: BasicMod, key: Key) -> bool {
+        self.one_shot_keys[m.index()].contains(&key)
     }
 
     /// このキーマップ内だけで割付を探す（親は見ない。yamy の `Keymap::searchAssignment`）。

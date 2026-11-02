@@ -27,7 +27,7 @@
 //!                                              #        | &HelpMessage(["タイトル" [, "本文"]]) | &HelpVariable("タイトル")
 //!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）
 //!                                              # NL- CL- SL- KL-（NumLock CapsLock ScrollLock カナ）も書ける
-//! mod MODNAME (=|+=|-=) KEY...
+//! mod MODNAME (=|+=|-=) [!!]KEY...                # !! はワンショット（単独で押して離したらそのキー）
 //! keyseq $NAME = ACTION...                     # 使う側で展開する。キーに IL- IC- なども書ける（def subst の右辺で効く）
 //! ```
 //!
@@ -36,7 +36,7 @@
 //! `U-` `D-` は押し・離しの区別（両方または無指定なら両方）。
 //! 未指定の `IC-` は「変換中でない」を要求し（yamy の既定）、`IL-` は dontcare。
 //!
-//! これ以外（`def option`、上記以外の `&関数`、`!`/`!!`/`!!!`、R- MAX- 等の割当修飾）は
+//! これ以外（`def option`、上記以外の `&関数`、`!`/`!!!`、`mod !!MODNAME`、R- MAX- 等の割当修飾）は
 //! エラーにする。
 //!
 //! ファイルの文字コードは UTF-8（BOM の有無は問わない）か CP932。UTF-8 として正しければ UTF-8、
@@ -117,9 +117,10 @@ enum ModOp {
 }
 
 /// 構築中のキーマップ。`mod` 文は親の確定を待つので、ここでは演算のまま持つ。
+/// 各項は（演算, キー, `!!` 付きか）。
 struct KeymapBuild {
     keymap: Keymap,
-    mod_ops: [Vec<(ModOp, Key)>; BasicMod::ALL.len()],
+    mod_ops: [Vec<(ModOp, Key, bool)>; BasicMod::ALL.len()],
 }
 
 struct Loader {
@@ -1014,23 +1015,36 @@ impl Loader {
         if cur.at_end() {
             return self.err("キー名が無い");
         }
-        while let Some(t) = cur.next() {
-            if let Token::Sym(s @ ("!" | "!!" | "!!!")) = t {
-                return self.err(format!("`{s}`（修飾キーの単独押し動作）は未対応"));
+        while let Some(mut t) = cur.next() {
+            // `!!` はワンショット（yamy の AM_oneShot）。`!` `!!!` はまだ読まない
+            let mut one_shot = false;
+            match t {
+                Token::Sym("!!") => {
+                    one_shot = true;
+                    let Some(next) = cur.next() else {
+                        return self.err("`!!` の後はキー名");
+                    };
+                    t = next;
+                }
+                Token::Sym(s @ ("!" | "!!!")) => {
+                    return self.err(format!("`{s}`（修飾キーの単独押し動作）は未対応"));
+                }
+                _ => {}
             }
             let key = self.key_by_name(t)?;
             let ops = &mut self.keymaps[self.current].mod_ops[m.index()];
             match op {
                 ModOp::New => {
                     ops.clear();
-                    ops.push((ModOp::New, key));
+                    ops.push((ModOp::New, key, one_shot));
                     op = ModOp::Add;
                 }
                 _ => {
-                    if let Some(e) = ops.iter_mut().find(|(_, k)| *k == key) {
+                    if let Some(e) = ops.iter_mut().find(|(_, k, _)| *k == key) {
                         e.0 = op;
+                        e.2 = one_shot;
                     } else {
-                        ops.push((op, key));
+                        ops.push((op, key, one_shot));
                     }
                 }
             }
@@ -1553,31 +1567,41 @@ impl Loader {
         for build in self.keymaps.drain(..) {
             let mut km = build.keymap;
             for (i, ops) in build.mod_ops.iter().enumerate() {
-                let mut keys: Vec<Key> = match km.parent {
-                    Some(p) => resolved[p.0].mod_keys[i].clone(),
-                    None => self.def_mods[i].clone(),
+                // （キー, `!!` 付きか）
+                let mut keys: Vec<(Key, bool)> = match km.parent {
+                    Some(p) => {
+                        let parent = &resolved[p.0];
+                        parent.mod_keys[i]
+                            .iter()
+                            .map(|k| (*k, parent.is_one_shot(BasicMod::ALL[i], *k)))
+                            .collect()
+                    }
+                    None => self.def_mods[i].iter().map(|k| (*k, false)).collect(),
                 };
-                for (op, key) in ops {
+                for (op, key, one_shot) in ops {
                     match op {
                         ModOp::New => {
                             keys.clear();
-                            keys.push(*key);
+                            keys.push((*key, *one_shot));
                         }
-                        ModOp::Add => keys.push(*key),
+                        ModOp::Add => keys.push((*key, *one_shot)),
                         ModOp::Sub => {
-                            if let Some(pos) = keys.iter().position(|k| k == key) {
+                            if let Some(pos) = keys.iter().position(|(k, _)| k == key) {
                                 keys.remove(pos);
                             }
                         }
                     }
                 }
-                let mut dedup = Vec::with_capacity(keys.len());
-                for k in keys {
-                    if !dedup.contains(&k) {
-                        dedup.push(k);
+                // 重なったキーは最初の位置に、後に書いた `!!` の有無で残す
+                let mut dedup: Vec<(Key, bool)> = Vec::with_capacity(keys.len());
+                for (k, one_shot) in keys {
+                    match dedup.iter_mut().find(|(d, _)| *d == k) {
+                        Some(d) => d.1 = one_shot,
+                        None => dedup.push((k, one_shot)),
                     }
                 }
-                km.mod_keys[i] = dedup;
+                km.mod_keys[i] = dedup.iter().map(|(k, _)| *k).collect();
+                km.one_shot_keys[i] = dedup.iter().filter(|(_, o)| *o).map(|(k, _)| *k).collect();
             }
             resolved.push(km);
         }
@@ -1795,6 +1819,36 @@ mod tests {
             root.mod_keys[BasicMod::Control.index()],
             vec![LCONTROL, RCONTROL]
         );
+    }
+
+    #[test]
+    fn one_shot_modifier() {
+        let c = load_ok(
+            "mod alt = !!LAlt
+             mod control += !!英数
+             mod control += 英数
+             mod shift += !!E0RShift
+             keymap Child : Global
+              mod shift -= E0RShift",
+        );
+        let g = &c.keymaps[0];
+        assert_eq!(g.mod_keys[BasicMod::Alt.index()], vec![LALT]);
+        assert_eq!(
+            g.mod_keys[BasicMod::Control.index()],
+            vec![LCONTROL, RCONTROL, EISUU]
+        );
+        // 同じキーマップで書き直すと最後の書き方になる（yamy の addModifier）
+        assert!(g.is_one_shot(BasicMod::Alt, LALT));
+        assert!(!g.is_one_shot(BasicMod::Control, EISUU));
+        assert!(g.is_one_shot(BasicMod::Shift, E0RSHIFT));
+        assert!(!g.is_one_shot(BasicMod::Shift, LSHIFT));
+        // 親から継承し、外したキーは外れる
+        let child = &c.keymaps[1];
+        assert!(child.is_one_shot(BasicMod::Alt, LALT));
+        assert!(!child.is_one_shot(BasicMod::Shift, E0RSHIFT));
+        // ! と !!! はまだ読まない
+        assert!(load_err("mod alt = !LAlt").message.contains("未対応"));
+        assert!(load_err("mod alt = !!!LAlt").message.contains("未対応"));
     }
 
     #[test]

@@ -137,6 +137,8 @@ pub struct Engine {
     /// 複数スキャンコードのキーの組み立て途中（yamy の `keyboardHandler` の `key`）。
     /// 押し・離しは最初のスキャンコードのもの。
     pending: Option<Input>,
+    /// `!!` の修飾キーを押したときの修飾（yamy の `m_oneShotKey`）。他のキーを押したら消す。
+    one_shot: Option<(ModState, ModSpec)>,
     out: Vec<Output>,
 }
 
@@ -154,6 +156,7 @@ impl Engine {
             is_prefix: false,
             variable: 0,
             pending: None,
+            one_shot: None,
             pressed: HashSet::new(),
             held: HashMap::new(),
             locks: LockState::empty(),
@@ -243,6 +246,50 @@ impl Engine {
             event_mods = event_mods.dontcare(m);
         }
 
+        if own_mod.is_some_and(|m| keymap.is_one_shot(m, key)) {
+            // `!!` の修飾キー（yamy の AM_oneShot）: 押しでは何も出さない。他のキーを押さずに離したら、
+            // 押したときの修飾でこのキーを押して離す。&Prefix の後は yamy と同じく何も出さない
+            if !self.is_prefix {
+                match edge {
+                    Edge::Down => self.one_shot = Some((state, event_mods)),
+                    Edge::Up => {
+                        if let Some((state, event_mods)) = self.one_shot.take() {
+                            self.begin_generating(key, Edge::Down, state, event_mods);
+                            self.begin_generating(key, Edge::Up, state, event_mods);
+                        }
+                    }
+                }
+            }
+        } else {
+            if edge == Edge::Down {
+                self.one_shot = None;
+            }
+            self.generate_with_prefix(key, edge, own_mod, state, event_mods);
+        }
+
+        // 物理キーが全部離れたら、OS 側に残した修飾とキーも全部離す。
+        if self.pressed.is_empty() {
+            self.generate_modifier_events(ModSpec::none());
+            let mut rest: Vec<Key> = self.win32_pressed.drain().collect();
+            rest.sort();
+            for k in rest {
+                self.out.push(Output::Release(k));
+            }
+            self.one_shot = None;
+        }
+
+        std::mem::take(&mut self.out)
+    }
+
+    /// `&Prefix` の前後処理をして 1 キーを出す。
+    fn generate_with_prefix(
+        &mut self,
+        key: Key,
+        edge: Edge,
+        own_mod: Option<BasicMod>,
+        state: ModState,
+        event_mods: ModSpec,
+    ) {
         // &Prefix の前後処理（yamy の beginGeneratingKeyboardEvents）。
         //   (1) D-prefix  : 現在のキーマップで解決し &Prefix(X) が走る
         //   (2) U-prefix  : root で解決し、終わったら X に戻す
@@ -256,6 +303,19 @@ impl Engine {
             }
         }
 
+        self.begin_generating(key, edge, state, event_mods);
+
+        if own_mod.is_none() {
+            if !self.is_prefix {
+                self.current = self.root();
+            } else if edge == Edge::Up {
+                self.current = saved;
+            }
+        }
+    }
+
+    /// いまのキーマップで 1 キーを出す（`def subst`・event・押したときの動作列の記録を含む）。
+    fn begin_generating(&mut self, key: Key, edge: Edge, state: ModState, event_mods: ModSpec) {
         let keymap_id = self.current;
         let mut cur = Current {
             input: key,
@@ -289,26 +349,6 @@ impl Engine {
         if edge == Edge::Up {
             self.generate_event(EventKind::AfterKeyUp, keymap_id, cur, 0);
         }
-
-        if own_mod.is_none() {
-            if !self.is_prefix {
-                self.current = self.root();
-            } else if edge == Edge::Up {
-                self.current = saved;
-            }
-        }
-
-        // 物理キーが全部離れたら、OS 側に残した修飾とキーも全部離す。
-        if self.pressed.is_empty() {
-            self.generate_modifier_events(ModSpec::none());
-            let mut rest: Vec<Key> = self.win32_pressed.drain().collect();
-            rest.sort();
-            for k in rest {
-                self.out.push(Output::Release(k));
-            }
-        }
-
-        std::mem::take(&mut self.out)
     }
 
     /// 現在のキーマップの修飾キー登録と物理押下状態から、いま押されている修飾を求める。
@@ -689,6 +729,95 @@ mod tests {
         );
         assert_eq!(e.feed(Input::down(k45)), vec![Output::Press(k45)]);
         assert_eq!(e.feed(Input::up(k45)), vec![Output::Release(k45)]);
+    }
+
+    const L_WIN: Key = Key::e0(0x5b);
+
+    /// `def mod Windows = LWin` と `mod win = !!LWin`。
+    fn one_shot_win() -> (Config, Keymap) {
+        let (mut config, mut global) = base();
+        config.def_mod(BasicMod::Windows, [L_WIN]);
+        global.add_one_shot_mod_key(BasicMod::Windows, L_WIN);
+        (config, global)
+    }
+
+    #[test]
+    fn one_shot_modifier_alone_acts_as_the_key_on_release() {
+        let (config, global) = one_shot_win();
+        let mut e = engine(config, vec![global]);
+
+        // 押しでは何も出さず、離しで押して離す（オートリピートの押しも何も出さない）
+        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(
+            e.feed(Input::up(L_WIN)),
+            vec![Output::Press(L_WIN), Output::Release(L_WIN)]
+        );
+    }
+
+    #[test]
+    fn one_shot_modifier_uses_its_assignment() {
+        let (config, mut global) = one_shot_win();
+        // key W-LWin = A（引くときは自分の修飾も押されている。yamy と同じ）
+        global.assign(
+            L_WIN,
+            ModSpec::none().with(BasicMod::Windows),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::key(A)],
+        );
+        // key W-C-LWin = B
+        global.assign(
+            L_WIN,
+            ModSpec::none()
+                .with(BasicMod::Windows)
+                .with(BasicMod::Control),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::key(B)],
+        );
+        let mut e = engine(config, vec![global]);
+
+        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(
+            e.feed(Input::up(L_WIN)),
+            vec![Output::Press(A), Output::Release(A)]
+        );
+        // 引くときの修飾は押したときのもの（離す前に Control を離しても C- で引く）
+        assert_eq!(
+            e.feed(Input::down(L_CONTROL)),
+            vec![Output::Press(L_CONTROL)]
+        );
+        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(
+            e.feed(Input::up(L_CONTROL)),
+            vec![Output::Release(L_CONTROL)]
+        );
+        assert_eq!(
+            e.feed(Input::up(L_WIN)),
+            vec![Output::Press(B), Output::Release(B)]
+        );
+    }
+
+    #[test]
+    fn one_shot_modifier_with_other_key_acts_as_modifier() {
+        let (config, global) = one_shot_win();
+        let mut e = engine(config, vec![global]);
+
+        // 押している間は修飾として効き、他のキーを挟んだら離しで何も出さない
+        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(
+            e.feed(Input::down(A)),
+            vec![Output::Press(L_WIN), Output::Press(A)]
+        );
+        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(A)]);
+        assert_eq!(e.feed(Input::up(L_WIN)), vec![Output::Release(L_WIN)]);
+        // 挟んだ記録は次に持ち越さない
+        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(
+            e.feed(Input::up(L_WIN)),
+            vec![Output::Press(L_WIN), Output::Release(L_WIN)]
+        );
     }
 
     #[test]
