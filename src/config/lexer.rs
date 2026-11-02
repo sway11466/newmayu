@@ -2,6 +2,7 @@
 //!
 //! - 1 行 = 1 文。行末の `\` で次の行に続く。`#` 以降はコメント
 //! - 記号・接頭辞（`=` `+=` `C-` `E0-` `*` `~` など）は最長一致で 1 トークン
+//! - `(` か `,` の直後に `,` `)` が来たら、間に空の名前を入れる（空の引数）
 //! - `"..."` `'...'` は文字列、`/.../` は正規表現
 //! - それ以外は名前。名前に使える文字は英数字・非 ASCII・`-+/?_\`
 //! - 名前が数値として読めれば数値（`0x3a` `45`）。読めた所までで区切る
@@ -61,7 +62,7 @@ const SYMBOLS: &[&str] = &[
     "S-", "A-", "M-", "C-", "W-", "U-", "D-", "R-", "IL-", "IC-", "I-", "NL-", "CL-", "SL-", "KL-",
     "T-", "TS-", "M0-", "M1-", "M2-", "M3-", "M4-", "M5-", "M6-", "M7-", "M8-", "M9-", "L0-",
     "L1-", "L2-", "L3-", "L4-", "L5-", "L6-", "L7-", "L8-", "L9-", "=", ":", "$", "&", "!", "*",
-    "~", "(", ")", ",",
+    "~",
 ];
 
 fn is_name_char(c: char) -> bool {
@@ -101,12 +102,30 @@ pub fn tokenize(src: &str) -> Result<Vec<Line>, LexError> {
 fn tokenize_line(text: &str, line: usize) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let mut rest = text;
+    // yamy の `isTokenExist`。`(` か `,` の後に語が来たか
+    let mut token_exist = false;
     loop {
         rest = rest.trim_start();
         let Some(c) = rest.chars().next() else { break };
         if c == '#' {
             break;
         }
+
+        // 空の引数：`(` か `,` の直後の `,` `)` の前に空の名前を入れる（`()` も空の引数 1 個）
+        if c == ',' || c == '(' || c == ')' {
+            if c != '(' && !token_exist {
+                tokens.push(Token::Name(String::new()));
+            }
+            token_exist = c == ')';
+            tokens.push(Token::Sym(match c {
+                ',' => ",",
+                '(' => "(",
+                _ => ")",
+            }));
+            rest = &rest[1..];
+            continue;
+        }
+        token_exist = true;
 
         // 記号・接頭辞（大文字小文字を問わない）
         if let Some(sym) = SYMBOLS.iter().find(|s| starts_with_ignore_case(rest, s)) {
@@ -300,6 +319,37 @@ mod tests {
                 Token::Number(0, "0".into()),
                 Token::Sym(")"),
             ]
+        );
+    }
+
+    #[test]
+    fn empty_argument_becomes_empty_name() {
+        let f = |args: Vec<Token>| {
+            let mut v = vec![Token::Sym("&"), Token::Name("F".into()), Token::Sym("(")];
+            v.extend(args);
+            v.push(Token::Sym(")"));
+            v
+        };
+        let empty = || Token::Name(String::new());
+        assert_eq!(
+            toks("&F(\"a\", )"),
+            f(vec![Token::Str("a".into()), Token::Sym(","), empty()])
+        );
+        assert_eq!(toks("&F()"), f(vec![empty()]));
+        assert_eq!(
+            toks("&F(1,, 2)"),
+            f(vec![
+                Token::Number(1, "1".into()),
+                Token::Sym(","),
+                empty(),
+                Token::Sym(","),
+                Token::Number(2, "2".into()),
+            ])
+        );
+        // 行継続をまたいでも同じ
+        assert_eq!(
+            toks("&F(\"a\", \\\n )"),
+            f(vec![Token::Str("a".into()), Token::Sym(","), empty()])
         );
     }
 

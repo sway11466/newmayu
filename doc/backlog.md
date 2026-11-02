@@ -90,14 +90,6 @@
 - 対応：(1) パーサーに足す（show_command は `ShowNormal` などの名前）。(2) Win32 の `ShellExecuteW` を呼ぶ。
 - 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
 
-### feature-14
-
-**空の引数**
-- ゴール：`&HelpMessage("KeyMap", )` のように空の引数を含む `.mayu` が、yamy と同じく読める。
-- 背景：オーナーの ObjectBrowser.mayu にある（行末の `\` で続けた後が `)`）。yamy では読めている。いまは「引数が空」の読み込みエラーにしている。
-- 対応：yamy のパーサーが空の引数をどう読むかを調べて合わせる。
-- 該当：`src/config/parser.rs`。
-
 ## リファクタリング
 
 挙がった改善項目。採番は本書冒頭「index」。各エントリは 背景／ゴール／対応／該当 で記す。

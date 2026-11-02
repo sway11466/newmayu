@@ -244,29 +244,20 @@ struct Args<'a> {
 
 impl Args<'_> {
     fn int(&self, i: usize) -> Result<i32> {
-        match self.args.get(i) {
-            Some(Token::Number(v, _)) => match i32::try_from(*v) {
-                Ok(v) => Ok(v),
-                Err(_) => self
-                    .loader
-                    .err(format!("`&{}`: 数が大きすぎる", self.fname)),
-            },
-            Some(t) => self.loader.err(format!(
-                "`&{}`: {} 番目の引数は数: `{t}`",
-                self.fname,
-                i + 1
-            )),
-            None => self.loader.err(format!(
-                "`&{}`: {} 番目の引数（数）が無い",
-                self.fname,
-                i + 1
-            )),
+        let v = self.i64(i)?;
+        match i32::try_from(v) {
+            Ok(v) => Ok(v),
+            Err(_) => self
+                .loader
+                .err(format!("`&{}`: 数が大きすぎる", self.fname)),
         }
     }
 
+    /// 空の引数は 0（yamy の `Token::getNumber`）。
     fn i64(&self, i: usize) -> Result<i64> {
         match self.args.get(i) {
             Some(Token::Number(v, _)) => Ok(*v),
+            Some(Token::Name(s)) if s.is_empty() => Ok(0),
             Some(t) => self.loader.err(format!(
                 "`&{}`: {} 番目の引数は数: `{t}`",
                 self.fname,
@@ -1347,21 +1338,15 @@ impl Loader {
     }
 
     /// `( 引数 , 引数 … )` を読む。`(` が無ければ空。
+    /// 空の引数は字句解析が空の名前にしてあるので、`()` は空の引数 1 個になる（yamy と同じ）。
     fn load_args(&self, cur: &mut Cur) -> Result<Vec<Token>> {
         let mut args = Vec::new();
         if !cur.peek_sym("(") {
             return Ok(args);
         }
         cur.next();
-        if cur.peek_sym(")") {
-            cur.next();
-            return Ok(args);
-        }
         loop {
             match cur.next() {
-                Some(Token::Sym(")")) | Some(Token::Sym(",")) => {
-                    return self.err("引数が空");
-                }
                 // 並んだ文字列は 1 つにつなぐ（`"…\n" \ 改行 "…"` で長い本文を書く）
                 Some(Token::Str(s)) => {
                     let mut s = s.clone();
@@ -1998,7 +1983,7 @@ keymap Sub : Global"
         let c = load_ok(
             "key A = &WindowMove(-16, 0)
              key B = &WindowMove(1, 2, MDI)
-             key H = &WindowLower &WindowRaise(mdi) &WindowMaximize()
+             key H = &WindowLower &WindowRaise(mdi) &WindowMaximize
              key Space = &WindowClingToLeft &WindowClingToBottom(MDI)
              key BackSpace = &WindowSetAlpha(70) &WindowToggleTopMost &WindowRedraw
              key LShift = &MouseMove(0, -1) &WindowResizeTo(0, -100)
@@ -2099,7 +2084,27 @@ keymap Sub : Global"
                 .contains("overlapped")
         );
         assert!(load_err("key A = &MouseMove(1, 2").message.contains("`)`"));
-        assert!(load_err("key A = &MouseMove(1,, 2)").message.contains("空"));
+        // 空の引数は、数なら 0。yamy と同じく `()` は空の引数 1 個
+        let c = load_ok("key A = &MouseMove(, 2)");
+        assert_eq!(
+            only(global(&c), A).actions,
+            vec![Action::Func(Func::MouseMove { dx: 0, dy: 2 })]
+        );
+        assert!(
+            load_err("key A = &MouseMove(1,, 2)")
+                .message
+                .contains("引数が多い")
+        );
+        assert!(
+            load_err("key A = &WindowRedraw()")
+                .message
+                .contains("引数が多い")
+        );
+        assert!(
+            load_err("key A = &WindowMaximize()")
+                .message
+                .contains("overlapped")
+        );
     }
 
     #[test]
@@ -2128,6 +2133,9 @@ keymap Sub : Global"
             "key LShift = &HelpMessage(Mayu, \"再読込完了\")\n",
             // 並んだ文字列は行継続をまたいでもつなぐ
             "key BS = &HelpMessage(\"KeyMap\", \\\n \" 1 : a\\n\" \\\n \" 2 : b\" \\\n )\n",
+            // 空の引数は空の文字列
+            "key RShift = &HelpMessage(\"KeyMap\", \\\n )\n",
+            "key LControl = &HelpVariable()\n",
         ));
         let g = global(&c);
         let text = |t: &str, b: &str| {
@@ -2148,6 +2156,11 @@ keymap Sub : Global"
         );
         assert_eq!(only(g, LSHIFT).actions, vec![text("Mayu", "再読込完了")]);
         assert_eq!(only(g, BS).actions, vec![text("KeyMap", " 1 : a\n 2 : b")]);
+        assert_eq!(only(g, RSHIFT).actions, vec![text("KeyMap", "")]);
+        assert_eq!(
+            only(g, LCONTROL).actions,
+            vec![Action::HelpVariable(String::new())]
+        );
     }
 
     #[test]
