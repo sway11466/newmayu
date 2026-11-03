@@ -42,14 +42,6 @@
 - 対応：TSF の `ITfThreadMgr` / `ITfContext` の状態を DLL の中から読む、または `ITfUIElementSink` 系の通知を受ける方法を調べ、取れる方法で DLL に足す。
 - 該当：`hook/src/lib.rs`・`ipc/src/lib.rs`。
 
-### feature-10
-
-**&MouseWheel**
-- ゴール：`&MouseWheel(delta)` を含む `.mayu` が読め、押すと yamy と同じくホイールが回る（120 で 1 単位）。
-- 背景：オーナーの Global.mayu が C-S-v に割り付けている。いまは読み込みエラーにしている。
-- 対応：(1) パーサーに足す。(2) `SendInput` の `MOUSEEVENTF_WHEEL` で出す。
-- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`・`src/platform.rs`。
-
 ### feature-11
 
 **&Keymap**

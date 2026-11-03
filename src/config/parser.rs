@@ -1231,6 +1231,7 @@ impl Loader {
             "windowmove" | "windowresizeto" => 3,
             "windowmoveto" => 4,
             "mousemove" => 2,
+            "mousewheel" => 1,
             "windowtoggletopmost"
             | "windowredraw"
             | "undefined"
@@ -1304,6 +1305,7 @@ impl Loader {
                 dx: a.int(0)?,
                 dy: a.int(1)?,
             },
+            "mousewheel" => Func::MouseWheel(a.int(0)?),
             _ => unreachable!("上の max の表と同じ名前の集合"),
         };
         Ok(Some(f))
@@ -2146,6 +2148,16 @@ keymap Sub : Global"
                 .contains("overlapped")
         );
         assert!(load_err("key A = &MouseMove(1, 2").message.contains("`)`"));
+        let c = load_ok("key A = &MouseWheel(-120)");
+        assert_eq!(
+            only(global(&c), A).actions,
+            vec![Action::Func(Func::MouseWheel(-120))]
+        );
+        assert!(
+            load_err("key A = &MouseWheel(1, 2)")
+                .message
+                .contains("引数が多い")
+        );
         // 空の引数は、数なら 0。yamy と同じく `()` は空の引数 1 個
         let c = load_ok("key A = &MouseMove(, 2)");
         assert_eq!(

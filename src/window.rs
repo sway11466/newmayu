@@ -1,4 +1,4 @@
-//! 窓を操作する `&関数`（`&WindowMove` など）と `&MouseMove` の Win32 側。
+//! 窓を操作する `&関数`（`&WindowMove` など）と `&MouseMove`・`&MouseWheel` の Win32 側。
 //! yamy の function.cpp の funcWindow* と windowstool.cpp を写している。
 //!
 //! エンジンは OS を触らず、[`Output::Func`] に「フォーカス窓」と「何をするか」を乗せて返す。
@@ -14,6 +14,9 @@ use windows::Win32::System::DataExchange::{
 };
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetCursorPos, GetParent, GetWindowLongPtrW,
     GetWindowRect, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic, IsWindow,
@@ -229,6 +232,24 @@ impl WindowOps {
                     // SAFETY: 単純な API。
                     let _ = unsafe { SetCursorPos(pt.x + dx, pt.y + dy) };
                 }
+            }
+            Func::MouseWheel(delta) => {
+                // yamy の mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta, 0) と同じ
+                let input = INPUT {
+                    r#type: INPUT_MOUSE,
+                    Anonymous: INPUT_0 {
+                        mi: MOUSEINPUT {
+                            dx: 0,
+                            dy: 0,
+                            mouseData: delta as u32,
+                            dwFlags: MOUSEEVENTF_WHEEL,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                };
+                // SAFETY: input は有効な INPUT。
+                let _ = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
             }
         }
     }

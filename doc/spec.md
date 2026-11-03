@@ -123,7 +123,7 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | 関数 | yamy の動き | newmayu | 備考 |
 |---|---|---|---|
 | `&MouseMove(dx, dy)` | カーソルの相対移動 | ○ | |
-| `&MouseWheel(delta)` | ホイールを回す（120 で 1 単位） | × | |
+| `&MouseWheel(delta)` | ホイールを回す（120 で 1 単位） | ○ | |
 | `&MouseHook(type, parameter)` | マウスの動きをホイール（Wheel）や窓の移動（WindowMove）に変える。None で戻す | × | |
 | `&ClipboardCopy(文字列)` | 文字列をクリップボードへ | × | |
 | `&ClipboardUpcaseWord` / `&ClipboardDowncaseWord` | クリップボードの文字列を大文字 / 小文字に | ○ | |

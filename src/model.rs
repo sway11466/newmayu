@@ -681,6 +681,8 @@ pub enum Func {
     },
     /// `&MouseMove(dx, dy)`: マウスカーソルの相対移動。
     MouseMove { dx: i32, dy: i32 },
+    /// `&MouseWheel(delta)`: ホイールを回す（120 で奥へ 1 単位、-120 で手前へ 1 単位）。
+    MouseWheel(i32),
     /// `&Undefined`: ビープ音を鳴らす（割付の無いキーだと知らせる）。
     Undefined,
     /// `&PostMessage(宛先, メッセージ, wParam, lParam)`: 窓にメッセージを送る（PostMessage）。
