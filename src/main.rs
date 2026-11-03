@@ -46,7 +46,7 @@ use newmayu::model::{Config, Key, LockMod};
 use newmayu::notify::{HookDll, Mailslot, SyncShare};
 use newmayu::platform;
 use newmayu::ui::{Command, Tray};
-use newmayu::window::WindowOps;
+use newmayu::window::{self, WindowOps};
 use newmayu_ipc::{
     CAPS_LOCK, IME_COMPOSING, IME_OPEN, KANA_LOCK, Kind, NUM_LOCK, Notify, SCROLL_LOCK,
 };
@@ -223,7 +223,7 @@ fn wait_sync(sync: Option<Key>, rx: &Receiver<Event>, pending: &mut VecDeque<Eve
     log!("&Sync: {SYNC_WAIT:?} 待っても届かなかった");
 }
 
-/// エンジンの出力を出た順に実行する OS 窓口。キーは溜めておき、関数・`&Sync` の前と
+/// エンジンの出力を出た順に実行する OS 窓口。キーは溜めておき、関数・`&Sync`・クリップボードの前と
 /// 1 入力の最後にまとめて `SendInput` する。
 struct Exec<'a> {
     sync: Option<Key>,
@@ -262,6 +262,18 @@ impl Os for Exec<'_> {
                 wait_sync(self.sync, self.rx, self.pending);
             }
         }
+    }
+    fn clipboard_text(&mut self) -> Option<String> {
+        self.flush();
+        window::clipboard_text()
+    }
+    fn empty_clipboard(&mut self) {
+        self.flush();
+        window::empty_clipboard();
+    }
+    fn set_clipboard_text(&mut self, text: &str) {
+        self.flush();
+        window::set_clipboard_text(text);
     }
 }
 

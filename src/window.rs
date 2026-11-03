@@ -563,6 +563,46 @@ fn clipboard_change_case(upper: bool) {
     }
 }
 
+/// クリップボードの文字列。開けないか文字列が無ければ `None`。
+pub fn clipboard_text() -> Option<String> {
+    // SAFETY: 開いたら必ず CloseClipboard する。
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            crate::log!("クリップボードを開けない");
+            return None;
+        }
+        let text = read_clipboard_text();
+        let _ = CloseClipboard();
+        text
+    }
+}
+
+/// クリップボードを空にする。
+pub fn empty_clipboard() {
+    // SAFETY: 開いたら必ず CloseClipboard する。
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            crate::log!("クリップボードを開けない");
+            return;
+        }
+        let _ = EmptyClipboard();
+        let _ = CloseClipboard();
+    }
+}
+
+/// クリップボードを文字列で置き換える。
+pub fn set_clipboard_text(text: &str) {
+    // SAFETY: 開いたら必ず CloseClipboard する。
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            crate::log!("クリップボードを開けない");
+            return;
+        }
+        write_clipboard_text(text);
+        let _ = CloseClipboard();
+    }
+}
+
 /// クリップボードを開いている間に呼ぶ。文字列が無ければ `None`。
 unsafe fn read_clipboard_text() -> Option<String> {
     // SAFETY: 呼ぶ側がクリップボードを開いている。ハンドルは OS が持つ CF_UNICODETEXT の HGLOBAL。

@@ -520,6 +520,16 @@ pub enum Action {
     /// `&Repeat(( 動作… ) [, 上限])`: 動作列を変数の値の回数（上限まで）くり返す。
     /// 押したときは最後の 1 回だけ押したままにし、離したときにそれを離す。上限の既定は 10。
     Repeat { actions: Vec<Action>, max: i32 },
+    /// `&EmacsEditKillLineFunc`: 前回の kill-line の結果がクリップボードに無ければ溜めた分を捨て、
+    /// クリップボードを空にする。押したときだけ。
+    EmacsEditKillLineFunc,
+    /// `&EmacsEditKillLinePred(動作列1, 動作列2)`: 切り取った後のクリップボードを溜めた分に足し、
+    /// 空なら（Edit の行末）改行を足して動作列1、`…\r\n` なら（IE のテキストエリア）動作列2 を出す。
+    /// 押したときだけ。
+    EmacsEditKillLinePred {
+        seq1: Vec<Action>,
+        seq2: Vec<Action>,
+    },
     /// `&Sync`: ここまでに出したキーがフォーカス窓で処理されるのを待つ。押したときだけ。
     /// コンソール窓では待たない（yamy と同じ）。
     Sync,

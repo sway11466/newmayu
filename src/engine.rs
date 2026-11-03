@@ -77,6 +77,12 @@ pub enum Output {
 /// エンジンはキーと関数を割付に並んだ順に渡す（yamy と同じく、その場で実行する前提）。
 pub trait Os {
     fn output(&mut self, o: Output);
+    /// クリップボードの文字列。文字列が無ければ `None`。
+    fn clipboard_text(&mut self) -> Option<String>;
+    /// クリップボードを空にする。
+    fn empty_clipboard(&mut self);
+    /// クリップボードを文字列で置き換える。
+    fn set_clipboard_text(&mut self, text: &str);
 }
 
 /// キーマップ木の探索が戻らないときの上限（yamy と同じ 64）。
@@ -146,6 +152,11 @@ pub struct Engine {
     pending: Option<Input>,
     /// `!!` の修飾キーを押したときの修飾（yamy の `m_oneShotKey`）。他のキーを押したら消す。
     one_shot: Option<(ModState, ModSpec)>,
+    /// 続けて kill-line したときに溜めた文字列（yamy の `EmacsEditKillLine::m_buf`）。
+    kill_line: String,
+    /// この入力の処理で kill-line の関数が呼ばれなければ `kill_line` を捨てる
+    /// （yamy の `m_doForceReset`）。
+    kill_line_reset: bool,
 }
 
 impl Engine {
@@ -163,6 +174,8 @@ impl Engine {
             variable: 0,
             pending: None,
             one_shot: None,
+            kill_line: String::new(),
+            kill_line_reset: false,
             pressed: HashSet::new(),
             held: HashMap::new(),
             locks: LockState::empty(),
@@ -264,8 +277,8 @@ impl Engine {
                     Edge::Down => self.one_shot = Some((state, event_mods)),
                     Edge::Up => {
                         if let Some((state, event_mods)) = self.one_shot.take() {
-                            self.begin_generating(os, key, Edge::Down, state, event_mods);
-                            self.begin_generating(os, key, Edge::Up, state, event_mods);
+                            self.begin_generating(os, key, Edge::Down, state, event_mods, false);
+                            self.begin_generating(os, key, Edge::Up, state, event_mods, false);
                         }
                     }
                 }
@@ -317,7 +330,7 @@ impl Engine {
             }
         }
 
-        self.begin_generating(os, key, edge, state, event_mods);
+        self.begin_generating(os, key, edge, state, event_mods, own_mod.is_some());
 
         if own_mod.is_none() {
             if !self.is_prefix {
@@ -328,8 +341,26 @@ impl Engine {
         }
     }
 
-    /// いまのキーマップで 1 キーを出す（`def subst`・event・押したときの動作列の記録を含む）。
+    /// いまのキーマップで 1 キーを出す。修飾キー以外で kill-line の関数が呼ばれなければ、
+    /// 溜めた分を捨てる（yamy の beginGeneratingKeyboardEvents）。
     fn begin_generating(
+        &mut self,
+        os: &mut dyn Os,
+        key: Key,
+        edge: Edge,
+        state: ModState,
+        event_mods: ModSpec,
+        is_modifier: bool,
+    ) {
+        self.kill_line_reset = !is_modifier;
+        self.generate_key(os, key, edge, state, event_mods);
+        if self.kill_line_reset {
+            self.kill_line.clear();
+        }
+    }
+
+    /// いまのキーマップで 1 キーを出す（`def subst`・event・押したときの動作列の記録を含む）。
+    fn generate_key(
         &mut self,
         os: &mut dyn Os,
         key: Key,
@@ -556,6 +587,41 @@ impl Engine {
                     self.generate_key_seq_events(os, actions, Part::Up, keymap_id, cur, depth + 1);
                 }
             },
+            Action::EmacsEditKillLineFunc => {
+                if edge == Edge::Down {
+                    // yamy の EmacsEditKillLine::func
+                    if !self.kill_line.is_empty()
+                        && os.clipboard_text().as_deref() != Some(self.kill_line.as_str())
+                    {
+                        self.kill_line.clear();
+                    }
+                    os.empty_clipboard();
+                    self.kill_line_reset = false;
+                }
+            }
+            Action::EmacsEditKillLinePred { seq1, seq2 } => {
+                self.kill_line_reset = false;
+                if edge == Edge::Down {
+                    let text = os.clipboard_text().unwrap_or_default();
+                    let seq = append_kill_line(&mut self.kill_line, &text);
+                    os.set_clipboard_text(&self.kill_line);
+                    let actions = match seq {
+                        KillLineSeq::None => None,
+                        KillLineSeq::First => Some(seq1),
+                        KillLineSeq::Second => Some(seq2),
+                    };
+                    if let Some(actions) = actions {
+                        self.generate_key_seq_events(
+                            os,
+                            actions,
+                            Part::All,
+                            keymap_id,
+                            cur,
+                            depth + 1,
+                        );
+                    }
+                }
+            }
             Action::Vk {
                 vk,
                 extended,
@@ -677,6 +743,34 @@ impl Engine {
     }
 }
 
+/// `&EmacsEditKillLinePred` が出す動作列。
+#[derive(Debug, PartialEq, Eq)]
+enum KillLineSeq {
+    None,
+    First,
+    Second,
+}
+
+/// 切り取った後のクリップボードの文字列を溜めた分に足す（yamy の `makeNewKillLineBuf`）。
+/// - Edit の行末: `""` → 改行を足し、動作列1（改行を消す）
+/// - Edit のそれ以外: `"…"` → そのまま足す
+/// - IE のテキストエリアの行末: `"\r\n"` → そのまま足す
+/// - IE のテキストエリアのそれ以外: `"…\r\n"` → 末尾の改行を除いて足し、動作列2
+fn append_kill_line(buf: &mut String, text: &str) -> KillLineSeq {
+    if text.len() >= 3
+        && let Some(body) = text.strip_suffix("\r\n")
+    {
+        buf.push_str(body);
+        KillLineSeq::Second
+    } else if text.is_empty() {
+        buf.push_str("\r\n");
+        KillLineSeq::First
+    } else {
+        buf.push_str(text);
+        KillLineSeq::None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,17 +809,151 @@ mod tests {
         Engine::new(Config { keymaps, ..config })
     }
 
-    impl Os for Vec<Output> {
+    /// 出力を記録し、クリップボードを持つ偽の OS 窓口。
+    #[derive(Default)]
+    struct FakeOs {
+        out: Vec<Output>,
+        clipboard: Option<String>,
+        /// `&Sync` のたびに先頭を取り出してクリップボードにする（窓が切り取った結果の代わり）。
+        after_sync: std::collections::VecDeque<Option<String>>,
+    }
+
+    impl Os for FakeOs {
         fn output(&mut self, o: Output) {
-            self.push(o);
+            if o == Output::Sync
+                && let Some(c) = self.after_sync.pop_front()
+            {
+                self.clipboard = c;
+            }
+            self.out.push(o);
+        }
+        fn clipboard_text(&mut self) -> Option<String> {
+            self.clipboard.clone()
+        }
+        fn empty_clipboard(&mut self) {
+            self.clipboard = None;
+        }
+        fn set_clipboard_text(&mut self, text: &str) {
+            self.clipboard = Some(text.to_string());
         }
     }
 
     /// 1 イベントを処理し、出力を出した順に返す。
     fn feed(e: &mut Engine, input: Input) -> Vec<Output> {
-        let mut out = Vec::new();
-        e.feed(input, &mut out);
-        out
+        let mut os = FakeOs::default();
+        e.feed(input, &mut os);
+        os.out
+    }
+
+    /// `key A = &EmacsEditKillLineFunc B &Sync &EmacsEditKillLinePred((X), (H))`
+    /// （B が S-End C-X、X が Delete、H が Return Left の代わり）。
+    fn kill_line_engine() -> Engine {
+        let (config, mut global) = base();
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![
+                Action::EmacsEditKillLineFunc,
+                Action::key(B),
+                Action::Sync,
+                Action::EmacsEditKillLinePred {
+                    seq1: vec![Action::key(X)],
+                    seq2: vec![Action::key(H)],
+                },
+            ],
+        );
+        engine(config, vec![global])
+    }
+
+    /// A を押して離す。`cut` は切り取った後のクリップボード。
+    fn kill_line(e: &mut Engine, os: &mut FakeOs, cut: Option<&str>) -> Vec<Output> {
+        os.out.clear();
+        os.after_sync.push_back(cut.map(str::to_string));
+        e.feed(Input::down(A), os);
+        e.feed(Input::up(A), os);
+        std::mem::take(&mut os.out)
+    }
+
+    #[test]
+    fn kill_line_at_end_of_edit_line_deletes_the_newline() {
+        let mut e = kill_line_engine();
+        let mut os = FakeOs {
+            clipboard: Some("old".to_string()),
+            ..FakeOs::default()
+        };
+        assert_eq!(
+            kill_line(&mut e, &mut os, None),
+            vec![
+                Output::Press(B),
+                Output::Release(B),
+                Output::Sync,
+                Output::Press(X),
+                Output::Release(X),
+            ]
+        );
+        assert_eq!(os.clipboard.as_deref(), Some("\r\n"));
+    }
+
+    #[test]
+    fn kill_line_in_ie_textarea_uses_the_second_sequence() {
+        let mut e = kill_line_engine();
+        let mut os = FakeOs::default();
+        assert_eq!(
+            kill_line(&mut e, &mut os, Some("abc\r\n")),
+            vec![
+                Output::Press(B),
+                Output::Release(B),
+                Output::Sync,
+                Output::Press(H),
+                Output::Release(H),
+            ]
+        );
+        assert_eq!(os.clipboard.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn kill_line_repeated_accumulates() {
+        let mut e = kill_line_engine();
+        let mut os = FakeOs::default();
+        kill_line(&mut e, &mut os, Some("abc"));
+        assert_eq!(os.clipboard.as_deref(), Some("abc"));
+        kill_line(&mut e, &mut os, None);
+        kill_line(&mut e, &mut os, Some("def"));
+        assert_eq!(os.clipboard.as_deref(), Some("abc\r\ndef"));
+    }
+
+    #[test]
+    fn kill_line_starts_over_after_another_key() {
+        let mut e = kill_line_engine();
+        let mut os = FakeOs::default();
+        kill_line(&mut e, &mut os, Some("abc"));
+        e.feed(Input::down(F), &mut os);
+        e.feed(Input::up(F), &mut os);
+        kill_line(&mut e, &mut os, Some("def"));
+        assert_eq!(os.clipboard.as_deref(), Some("def"));
+    }
+
+    #[test]
+    fn kill_line_continues_across_a_modifier() {
+        let mut e = kill_line_engine();
+        let mut os = FakeOs::default();
+        kill_line(&mut e, &mut os, Some("abc"));
+        e.feed(Input::down(L_CONTROL), &mut os);
+        e.feed(Input::up(L_CONTROL), &mut os);
+        kill_line(&mut e, &mut os, Some("def"));
+        assert_eq!(os.clipboard.as_deref(), Some("abcdef"));
+    }
+
+    #[test]
+    fn kill_line_starts_over_if_clipboard_changed() {
+        let mut e = kill_line_engine();
+        let mut os = FakeOs::default();
+        kill_line(&mut e, &mut os, Some("abc"));
+        os.clipboard = Some("other".to_string());
+        kill_line(&mut e, &mut os, Some("def"));
+        assert_eq!(os.clipboard.as_deref(), Some("def"));
     }
 
     #[test]

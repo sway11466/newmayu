@@ -28,10 +28,10 @@
 
 ### feature-6
 
-**&Recenter / &EmacsEditKillLineFunc（編集コントロールの中での操作）**
-- ゴール：emacsedit.mayu の C-L（再描画と中央寄せ）と `$EmacsEdit/kill-line` が yamy と同じく動く。
-- 背景：yamy は 2 関数をフック DLL に送り、フォーカス窓のプロセスの中で Edit / RichEdit に `EM_GETSEL` などのメッセージを投げて処理する。`&Recenter` はキャレット行が画面の中央に来るようにスクロールする。`&EmacsEditKillLineFunc` はキャレットが行末なら改行を消し、そうでなければ行末までを切り取る（続けて押すと切り取り分を足す）。どちらも本体プロセスからのメッセージ送信では足りず、DLL の中で動かす必要がある。
-- 対応：(1) 本体から DLL へ関数の実行を頼む経路（yamy の `WM_MAYU_MESSAGE` に当たるもの）を足す。(2) DLL に 2 関数の処理を書く。(3) パーサーに足す。
+**&Recenter（編集コントロールの中での操作）**
+- ゴール：emacsedit.mayu の C-L（再描画と中央寄せ）が yamy と同じく動く。
+- 背景：yamy は登録したウィンドウメッセージをフォーカス窓へ送り、フック DLL がそのプロセスの中で処理する。複数行の Edit / RichEdit だけで、キャレット行が画面の中央に来るようにスクロールする。RichEdit の `EM_CHARFROMPOS` はポインタを渡すので、DLL の中で送る必要がある。
+- 対応：(1) 本体からフォーカス窓へ登録メッセージを送る。(2) DLL の `WH_GETMESSAGE` で受けて yamy と同じ計算でスクロールする。(3) パーサーに足す。
 - 該当：`hook/src/lib.rs`・`ipc/src/lib.rs`・`src/window.rs`・`src/config/parser.rs`。
 
 ### feature-7

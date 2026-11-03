@@ -931,20 +931,7 @@ impl Loader {
     /// `&Repeat(( ACTION... ) | $keyseq名 [, 上限])`。上限の既定は 10（yamy と同じ）。
     fn load_repeat(&mut self, cur: &mut Cur) -> Result<Action> {
         self.expect_sym(cur, "(")?;
-        let actions = match cur.next() {
-            Some(Token::Sym("(")) => self.load_actions(cur, true, false)?,
-            Some(Token::Sym("$")) => {
-                let Some(t) = cur.next() else {
-                    return self.err("`$` の後は keyseq 名");
-                };
-                let name = self.name_of(t)?;
-                match self.keyseqs.get(&lower(&name)) {
-                    Some(seq) => seq.clone(),
-                    None => return self.err(format!("keyseq `${name}` は未定義")),
-                }
-            }
-            _ => return self.err("&Repeat の 1 番目の引数は `( 動作… )` か `$keyseq名`"),
-        };
+        let actions = self.load_key_seq_arg(cur, "&Repeat の 1 番目の引数")?;
         let max = if cur.peek_sym(",") {
             cur.next();
             match cur.next() {
@@ -959,6 +946,34 @@ impl Loader {
         };
         self.expect_sym(cur, ")")?;
         Ok(Action::Repeat { actions, max })
+    }
+
+    /// `&EmacsEditKillLinePred(( ACTION... ) | $keyseq名, ( ACTION... ) | $keyseq名)`。
+    fn load_kill_line_pred(&mut self, cur: &mut Cur) -> Result<Action> {
+        self.expect_sym(cur, "(")?;
+        let seq1 = self.load_key_seq_arg(cur, "&EmacsEditKillLinePred の 1 番目の引数")?;
+        self.expect_sym(cur, ",")?;
+        let seq2 = self.load_key_seq_arg(cur, "&EmacsEditKillLinePred の 2 番目の引数")?;
+        self.expect_sym(cur, ")")?;
+        Ok(Action::EmacsEditKillLinePred { seq1, seq2 })
+    }
+
+    /// 動作列の引数 `( ACTION... )` か `$keyseq名`（yamy の `load_ARGUMENT(const KeySeq **)`）。
+    fn load_key_seq_arg(&mut self, cur: &mut Cur, what: &str) -> Result<Vec<Action>> {
+        match cur.next() {
+            Some(Token::Sym("(")) => self.load_actions(cur, true, false),
+            Some(Token::Sym("$")) => {
+                let Some(t) = cur.next() else {
+                    return self.err("`$` の後は keyseq 名");
+                };
+                let name = self.name_of(t)?;
+                match self.keyseqs.get(&lower(&name)) {
+                    Some(seq) => Ok(seq.clone()),
+                    None => self.err(format!("keyseq `${name}` は未定義")),
+                }
+            }
+            _ => self.err(format!("{what}は `( 動作… )` か `$keyseq名`")),
+        }
     }
 
     /// `key MODKEY... = ACTION...`
@@ -1156,6 +1171,14 @@ impl Loader {
                     }
                     if fname.eq_ignore_ascii_case("Repeat") {
                         out.push(self.load_repeat(cur)?);
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("EmacsEditKillLineFunc") {
+                        out.push(Action::EmacsEditKillLineFunc);
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("EmacsEditKillLinePred") {
+                        out.push(self.load_kill_line_pred(cur)?);
                         continue;
                     }
                     if fname.eq_ignore_ascii_case("HelpMessage") {
@@ -2243,6 +2266,34 @@ keymap Sub : Global"
         load_err("key A = &HelpMessage(\"a\", \"b\", \"c\")");
         load_err("key A = &HelpVariable");
         load_err("key A = &HelpVariable(\"a\", \"b\")");
+    }
+
+    #[test]
+    fn emacs_edit_kill_line() {
+        let c = load_ok(
+            "keyseq $Del = BS
+             key A = &EmacsEditKillLineFunc &EmacsEditKillLinePred($Del, (Space H))",
+        );
+        assert_eq!(
+            only(global(&c), A).actions,
+            vec![
+                Action::EmacsEditKillLineFunc,
+                Action::EmacsEditKillLinePred {
+                    seq1: vec![in_keyseq(BS, base())],
+                    seq2: vec![Action::key_with(SPACE, base()), Action::key_with(H, base())],
+                },
+            ]
+        );
+        assert!(
+            load_err("key A = &EmacsEditKillLinePred((BS))")
+                .message
+                .contains("`,`")
+        );
+        assert!(
+            load_err("key A = &EmacsEditKillLinePred(BS, (H))")
+                .message
+                .contains("1 番目の引数")
+        );
     }
 
     #[test]
