@@ -1,7 +1,7 @@
 //! キー入力を受けて出力を決める状態機械。
 //!
 //! OS には依存しない。フック側はキー 1 つごとに [`Engine::feed`] を呼び、
-//! 返った [`Output`] を `SendInput` に流す（物理入力そのものは常に抑制する前提）。
+//! 渡した [`Os`] が [`Output`] を順に実行する（物理入力そのものは常に抑制する前提）。
 //! yamy の `Engine::keyboardHandler` 以降の流れのうち、基本修飾・`def subst`・キーマップ木・
 //! `key` 割付・キー出力・`&Prefix`・窓によるキーマップ選択を写している。
 //!
@@ -73,6 +73,12 @@ pub enum Output {
     },
 }
 
+/// エンジンが出力を渡す先（OS 窓口）。本体は `SendInput` などで実行し、テストは記録する。
+/// エンジンはキーと関数を割付に並んだ順に渡す（yamy と同じく、その場で実行する前提）。
+pub trait Os {
+    fn output(&mut self, o: Output);
+}
+
 /// キーマップ木の探索が戻らないときの上限（yamy と同じ 64）。
 const MAX_KEYMAP_RECURSION: usize = 64;
 
@@ -140,7 +146,6 @@ pub struct Engine {
     pending: Option<Input>,
     /// `!!` の修飾キーを押したときの修飾（yamy の `m_oneShotKey`）。他のキーを押したら消す。
     one_shot: Option<(ModState, ModSpec)>,
-    out: Vec<Output>,
 }
 
 impl Engine {
@@ -162,7 +167,6 @@ impl Engine {
             held: HashMap::new(),
             locks: LockState::empty(),
             win32_pressed: HashSet::new(),
-            out: Vec::new(),
         }
     }
 
@@ -207,8 +211,8 @@ impl Engine {
         &self.focus
     }
 
-    /// 1 イベントを処理し、OS に出すイベント列を返す。
-    pub fn feed(&mut self, input: Input) -> Vec<Output> {
+    /// 1 イベントを処理し、OS に出すイベントを出した順に `os` へ渡す。
+    pub fn feed(&mut self, input: Input, os: &mut dyn Os) {
         // 複数スキャンコードのキー: 届いたスキャンコードを貯め、定義の先頭部分に一致するうちは
         // 何も出さずに次を待つ（yamy の searchKey / searchPrefixKey）
         let input = match self.pending.take() {
@@ -224,12 +228,12 @@ impl Engine {
         };
         if self.config.waits_for_more(input.key) {
             self.pending = Some(input);
-            return Vec::new();
+            return;
         }
         // def key に無いキーは捨て、押しているキーにも数えない（yamy の undefined key）
         if !self.config.keys.contains(&input.key) {
-            self.release_all_if_idle();
-            return std::mem::take(&mut self.out);
+            self.release_all_if_idle(os);
+            return;
         }
 
         let Input { key, edge } = input;
@@ -260,8 +264,8 @@ impl Engine {
                     Edge::Down => self.one_shot = Some((state, event_mods)),
                     Edge::Up => {
                         if let Some((state, event_mods)) = self.one_shot.take() {
-                            self.begin_generating(key, Edge::Down, state, event_mods);
-                            self.begin_generating(key, Edge::Up, state, event_mods);
+                            self.begin_generating(os, key, Edge::Down, state, event_mods);
+                            self.begin_generating(os, key, Edge::Up, state, event_mods);
                         }
                     }
                 }
@@ -270,23 +274,22 @@ impl Engine {
             if edge == Edge::Down {
                 self.one_shot = None;
             }
-            self.generate_with_prefix(key, edge, own_mod, state, event_mods);
+            self.generate_with_prefix(os, key, edge, own_mod, state, event_mods);
         }
 
-        self.release_all_if_idle();
-        std::mem::take(&mut self.out)
+        self.release_all_if_idle(os);
     }
 
     /// 物理キーが全部離れたら、OS 側に残した修飾とキーも全部離す。
-    fn release_all_if_idle(&mut self) {
+    fn release_all_if_idle(&mut self, os: &mut dyn Os) {
         if !self.pressed.is_empty() {
             return;
         }
-        self.generate_modifier_events(ModSpec::none());
+        self.generate_modifier_events(os, ModSpec::none());
         let mut rest: Vec<Key> = self.win32_pressed.drain().collect();
         rest.sort();
         for k in rest {
-            self.out.push(Output::Release(k));
+            os.output(Output::Release(k));
         }
         self.one_shot = None;
     }
@@ -294,6 +297,7 @@ impl Engine {
     /// `&Prefix` の前後処理をして 1 キーを出す。
     fn generate_with_prefix(
         &mut self,
+        os: &mut dyn Os,
         key: Key,
         edge: Edge,
         own_mod: Option<BasicMod>,
@@ -313,7 +317,7 @@ impl Engine {
             }
         }
 
-        self.begin_generating(key, edge, state, event_mods);
+        self.begin_generating(os, key, edge, state, event_mods);
 
         if own_mod.is_none() {
             if !self.is_prefix {
@@ -325,7 +329,14 @@ impl Engine {
     }
 
     /// いまのキーマップで 1 キーを出す（`def subst`・event・押したときの動作列の記録を含む）。
-    fn begin_generating(&mut self, key: Key, edge: Edge, state: ModState, event_mods: ModSpec) {
+    fn begin_generating(
+        &mut self,
+        os: &mut dyn Os,
+        key: Key,
+        edge: Edge,
+        state: ModState,
+        event_mods: ModSpec,
+    ) {
         let keymap_id = self.current;
         let mut cur = Current {
             input: key,
@@ -350,14 +361,16 @@ impl Engine {
             Edge::Up => self.held.remove(&key).filter(|h| h.cur.key == cur.key),
         };
         if edge == Edge::Down {
-            self.generate_event(EventKind::BeforeKeyDown, keymap_id, cur, 0);
+            self.generate_event(os, EventKind::BeforeKeyDown, keymap_id, cur, 0);
         }
         match held {
-            Some(h) => self.generate_key_seq_events(&h.actions, Part::Up, h.keymap_id, h.cur, 0),
-            None => self.generate_keyboard_events(keymap_id, cur, edge, 0),
+            Some(h) => {
+                self.generate_key_seq_events(os, &h.actions, Part::Up, h.keymap_id, h.cur, 0)
+            }
+            None => self.generate_keyboard_events(os, keymap_id, cur, edge, 0),
         }
         if edge == Edge::Up {
-            self.generate_event(EventKind::AfterKeyUp, keymap_id, cur, 0);
+            self.generate_event(os, EventKind::AfterKeyUp, keymap_id, cur, 0);
         }
     }
 
@@ -378,6 +391,7 @@ impl Engine {
     /// （yamy の `generateKeyboardEvents(Current)`）。
     fn generate_keyboard_events(
         &mut self,
+        os: &mut dyn Os,
         keymap_id: KeymapId,
         cur: Current,
         edge: Edge,
@@ -417,24 +431,25 @@ impl Engine {
             }
             Part::Up => {}
         }
-        self.generate_key_seq_events(&actions, part, keymap_id, cur, depth);
+        self.generate_key_seq_events(os, &actions, part, keymap_id, cur, depth);
     }
 
     /// 割付の無いキー、または `&Default` の動作: 物理キーをそのまま通す。
     /// 修飾は入力時の状態（自分が修飾キーなら dontcare）に揃える。
-    fn generate_default(&mut self, key: Key, event_mods: ModSpec, edge: Edge) {
+    fn generate_default(&mut self, os: &mut dyn Os, key: Key, event_mods: ModSpec, edge: Edge) {
         match edge {
             Edge::Down => {
-                self.generate_modifier_events(event_mods);
-                self.press(key);
+                self.generate_modifier_events(os, event_mods);
+                self.press(os, key);
             }
-            Edge::Up => self.release(key),
+            Edge::Up => self.release(os, key),
         }
     }
 
     /// `keymap_id` は動作列を引いたキーマップ（`&KeymapParent` が親をたどる起点）。
     fn generate_key_seq_events(
         &mut self,
+        os: &mut dyn Os,
         actions: &[Action],
         part: Part,
         keymap_id: KeymapId,
@@ -445,21 +460,22 @@ impl Engine {
             return;
         };
         if part == Part::Up {
-            self.generate_action_events(last, Edge::Up, keymap_id, cur, depth);
+            self.generate_action_events(os, last, Edge::Up, keymap_id, cur, depth);
             return;
         }
         for a in head {
-            self.generate_action_events(a, Edge::Down, keymap_id, cur, depth);
-            self.generate_action_events(a, Edge::Up, keymap_id, cur, depth);
+            self.generate_action_events(os, a, Edge::Down, keymap_id, cur, depth);
+            self.generate_action_events(os, a, Edge::Up, keymap_id, cur, depth);
         }
-        self.generate_action_events(last, Edge::Down, keymap_id, cur, depth);
+        self.generate_action_events(os, last, Edge::Down, keymap_id, cur, depth);
         if part == Part::All {
-            self.generate_action_events(last, Edge::Up, keymap_id, cur, depth);
+            self.generate_action_events(os, last, Edge::Up, keymap_id, cur, depth);
         }
     }
 
     fn generate_action_events(
         &mut self,
+        os: &mut dyn Os,
         action: &Action,
         edge: Edge,
         keymap_id: KeymapId,
@@ -482,28 +498,28 @@ impl Engine {
                 match edge {
                     Edge::Down => {
                         let m = mods.add(event_mods);
-                        self.generate_modifier_events(m);
-                        self.press(*key);
+                        self.generate_modifier_events(os, m);
+                        self.press(os, *key);
                     }
-                    Edge::Up => self.release(*key),
+                    Edge::Up => self.release(os, *key),
                 }
             }
             Action::Prefix(target) => {
                 if edge == Edge::Down {
                     self.current = *target;
                     self.is_prefix = true;
-                    self.generate_event(EventKind::Prefixed, *target, cur, depth + 1);
+                    self.generate_event(os, EventKind::Prefixed, *target, cur, depth + 1);
                 }
             }
-            Action::Default => self.generate_default(key, event_mods, edge),
+            Action::Default => self.generate_default(os, key, event_mods, edge),
             Action::KeymapParent => match self.config.keymap(keymap_id).parent {
-                Some(parent) => self.generate_keyboard_events(parent, cur, edge, depth + 1),
-                None => self.generate_default(key, event_mods, edge),
+                Some(parent) => self.generate_keyboard_events(os, parent, cur, edge, depth + 1),
+                None => self.generate_default(os, key, event_mods, edge),
             },
             Action::Ignore => {}
             Action::Sync => {
                 if edge == Edge::Down && !self.focus_is_console {
-                    self.out.push(Output::Sync);
+                    os.output(Output::Sync);
                 }
             }
             Action::Variable { mag, inc } => {
@@ -516,10 +532,18 @@ impl Engine {
                 Edge::Down => {
                     let end = self.variable.min(*max);
                     for _ in 1..end {
-                        self.generate_key_seq_events(actions, Part::All, keymap_id, cur, depth + 1);
+                        self.generate_key_seq_events(
+                            os,
+                            actions,
+                            Part::All,
+                            keymap_id,
+                            cur,
+                            depth + 1,
+                        );
                     }
                     if end > 0 {
                         self.generate_key_seq_events(
+                            os,
                             actions,
                             Part::Down,
                             keymap_id,
@@ -529,7 +553,7 @@ impl Engine {
                     }
                 }
                 Edge::Up => {
-                    self.generate_key_seq_events(actions, Part::Up, keymap_id, cur, depth + 1);
+                    self.generate_key_seq_events(os, actions, Part::Up, keymap_id, cur, depth + 1);
                 }
             },
             Action::Vk {
@@ -543,7 +567,7 @@ impl Engine {
                     Edge::Up => *up,
                 };
                 if emit {
-                    self.out.push(Output::Vk {
+                    os.output(Output::Vk {
                         vk: *vk,
                         extended: *extended,
                         up: edge == Edge::Up,
@@ -552,7 +576,7 @@ impl Engine {
             }
             Action::Func(f) => {
                 if edge == Edge::Down {
-                    self.out.push(Output::Func {
+                    os.output(Output::Func {
                         hwnd: self.focus_hwnd,
                         func: *f,
                     });
@@ -560,7 +584,7 @@ impl Engine {
             }
             Action::HelpMessage(text) => {
                 if edge == Edge::Down {
-                    self.out.push(Output::Help {
+                    os.output(Output::Help {
                         hwnd: self.focus_hwnd,
                         text: text.clone(),
                     });
@@ -568,7 +592,7 @@ impl Engine {
             }
             Action::HelpVariable(title) => {
                 if edge == Edge::Down {
-                    self.out.push(Output::Help {
+                    os.output(Output::Help {
                         hwnd: self.focus_hwnd,
                         text: Some(HelpText {
                             title: title.clone(),
@@ -583,7 +607,7 @@ impl Engine {
                     focus_idx: 0,
                     ..cur
                 };
-                self.generate_keyboard_events(root, cur, edge, depth + 1)
+                self.generate_keyboard_events(os, root, cur, edge, depth + 1)
             }
             Action::OtherWindowClass => {
                 let next = cur.focus_idx + 1;
@@ -593,25 +617,32 @@ impl Engine {
                             focus_idx: next,
                             ..cur
                         };
-                        self.generate_keyboard_events(k, cur, edge, depth + 1)
+                        self.generate_keyboard_events(os, k, cur, edge, depth + 1)
                     }
-                    None => self.generate_default(key, event_mods, edge),
+                    None => self.generate_default(os, key, event_mods, edge),
                 }
             }
         }
     }
 
     /// `event` の動作列を全部押して離す（yamy の `generateEvents`）。そのキーマップだけを見る。
-    fn generate_event(&mut self, kind: EventKind, keymap_id: KeymapId, cur: Current, depth: usize) {
+    fn generate_event(
+        &mut self,
+        os: &mut dyn Os,
+        kind: EventKind,
+        keymap_id: KeymapId,
+        cur: Current,
+        depth: usize,
+    ) {
         let Some(actions) = self.config.keymap(keymap_id).event(kind) else {
             return;
         };
         let actions = actions.to_vec();
-        self.generate_key_seq_events(&actions, Part::All, keymap_id, cur, depth);
+        self.generate_key_seq_events(os, &actions, Part::All, keymap_id, cur, depth);
     }
 
     /// 出力キーに必要な修飾を OS 側で揃える。dontcare の修飾は触らない。
-    fn generate_modifier_events(&mut self, mods: ModSpec) {
+    fn generate_modifier_events(&mut self, os: &mut dyn Os, mods: ModSpec) {
         for m in BasicMod::ALL {
             if mods.is_dontcare(m) {
                 continue;
@@ -620,12 +651,12 @@ impl Engine {
             if mods.is_pressed(m) {
                 let none_pressed = !keys.iter().any(|k| self.win32_pressed.contains(k));
                 if none_pressed && let Some(first) = keys.first() {
-                    self.press(*first);
+                    self.press(os, *first);
                 }
             } else {
                 for k in keys {
                     if self.win32_pressed.contains(&k) {
-                        self.release(k);
+                        self.release(os, k);
                     }
                 }
             }
@@ -633,15 +664,15 @@ impl Engine {
     }
 
     /// 押下は毎回出す（OS のオートリピートに相当する入力をそのまま通すため）。
-    fn press(&mut self, key: Key) {
+    fn press(&mut self, os: &mut dyn Os, key: Key) {
         self.win32_pressed.insert(key);
-        self.out.push(Output::Press(key));
+        os.output(Output::Press(key));
     }
 
     /// 離しは OS 側で押されているときだけ出す。
-    fn release(&mut self, key: Key) {
+    fn release(&mut self, os: &mut dyn Os, key: Key) {
         if self.win32_pressed.remove(&key) {
-            self.out.push(Output::Release(key));
+            os.output(Output::Release(key));
         }
     }
 }
@@ -684,6 +715,19 @@ mod tests {
         Engine::new(Config { keymaps, ..config })
     }
 
+    impl Os for Vec<Output> {
+        fn output(&mut self, o: Output) {
+            self.push(o);
+        }
+    }
+
+    /// 1 イベントを処理し、出力を出した順に返す。
+    fn feed(e: &mut Engine, input: Input) -> Vec<Output> {
+        let mut out = Vec::new();
+        e.feed(input, &mut out);
+        out
+    }
+
     #[test]
     fn simple_remap_a_to_b() {
         let (config, mut global) = base();
@@ -697,8 +741,8 @@ mod tests {
         );
         let mut e = engine(config, vec![global]);
 
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(B)]);
     }
 
     /// `def key Pause = E1-0x1d 0x45`
@@ -727,22 +771,22 @@ mod tests {
         let k45 = Key::plain(0x45);
 
         // 定義の先頭部分に一致するうちは何も出さずに待ち、揃ったら 1 キーとして引く
-        assert_eq!(e.feed(Input::down(e1_1d)), vec![]);
-        assert_eq!(e.feed(Input::down(k45)), vec![Output::Press(B)]);
-        assert_eq!(e.feed(Input::up(e1_1d)), vec![]);
-        assert_eq!(e.feed(Input::up(k45)), vec![Output::Release(B)]);
+        assert_eq!(feed(&mut e, Input::down(e1_1d)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(k45)), vec![Output::Press(B)]);
+        assert_eq!(feed(&mut e, Input::up(e1_1d)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(k45)), vec![Output::Release(B)]);
         // 先頭部分でないキーは待たない
         assert_eq!(
-            e.feed(Input::down(L_CONTROL)),
+            feed(&mut e, Input::down(L_CONTROL)),
             vec![Output::Press(L_CONTROL)]
         );
         assert_eq!(
-            e.feed(Input::up(L_CONTROL)),
+            feed(&mut e, Input::up(L_CONTROL)),
             vec![Output::Release(L_CONTROL)]
         );
         // def key に無いキーは捨てる（yamy と同じ）
-        assert_eq!(e.feed(Input::down(k45)), vec![]);
-        assert_eq!(e.feed(Input::up(k45)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(k45)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(k45)), vec![]);
     }
 
     #[test]
@@ -751,19 +795,19 @@ mod tests {
         let mut e = engine(config, vec![global]);
         let undefined = Key::plain(0x45);
 
-        assert_eq!(e.feed(Input::down(undefined)), vec![]);
-        assert_eq!(e.feed(Input::up(undefined)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(undefined)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(undefined)), vec![]);
         // 押しているキーの数にも数えない
         assert_eq!(
-            e.feed(Input::down(L_CONTROL)),
+            feed(&mut e, Input::down(L_CONTROL)),
             vec![Output::Press(L_CONTROL)]
         );
-        assert_eq!(e.feed(Input::down(undefined)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(undefined)), vec![]);
         assert_eq!(
-            e.feed(Input::up(L_CONTROL)),
+            feed(&mut e, Input::up(L_CONTROL)),
             vec![Output::Release(L_CONTROL)]
         );
-        assert_eq!(e.feed(Input::up(undefined)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(undefined)), vec![]);
     }
 
     const L_WIN: Key = Key::e0(0x5b);
@@ -782,10 +826,10 @@ mod tests {
         let mut e = engine(config, vec![global]);
 
         // 押しでは何も出さず、離しで押して離す（オートリピートの押しも何も出さない）
-        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
-        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(L_WIN)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(L_WIN)), vec![]);
         assert_eq!(
-            e.feed(Input::up(L_WIN)),
+            feed(&mut e, Input::up(L_WIN)),
             vec![Output::Press(L_WIN), Output::Release(L_WIN)]
         );
     }
@@ -813,23 +857,23 @@ mod tests {
         );
         let mut e = engine(config, vec![global]);
 
-        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(L_WIN)), vec![]);
         assert_eq!(
-            e.feed(Input::up(L_WIN)),
+            feed(&mut e, Input::up(L_WIN)),
             vec![Output::Press(A), Output::Release(A)]
         );
         // 引くときの修飾は押したときのもの（離す前に Control を離しても C- で引く）
         assert_eq!(
-            e.feed(Input::down(L_CONTROL)),
+            feed(&mut e, Input::down(L_CONTROL)),
             vec![Output::Press(L_CONTROL)]
         );
-        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(L_WIN)), vec![]);
         assert_eq!(
-            e.feed(Input::up(L_CONTROL)),
+            feed(&mut e, Input::up(L_CONTROL)),
             vec![Output::Release(L_CONTROL)]
         );
         assert_eq!(
-            e.feed(Input::up(L_WIN)),
+            feed(&mut e, Input::up(L_WIN)),
             vec![Output::Press(B), Output::Release(B)]
         );
     }
@@ -840,26 +884,26 @@ mod tests {
         let mut e = engine(config, vec![global]);
 
         // 押している間は修飾として効き、他のキーを挟んだら離しで何も出さない
-        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(L_WIN)), vec![]);
         assert_eq!(
-            e.feed(Input::down(A)),
+            feed(&mut e, Input::down(A)),
             vec![Output::Press(L_WIN), Output::Press(A)]
         );
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(A)]);
-        assert_eq!(e.feed(Input::up(L_WIN)), vec![Output::Release(L_WIN)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(A)]);
+        assert_eq!(feed(&mut e, Input::up(L_WIN)), vec![Output::Release(L_WIN)]);
         // 挟んだ記録は次に持ち越さない
-        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(L_WIN)), vec![]);
         assert_eq!(
-            e.feed(Input::up(L_WIN)),
+            feed(&mut e, Input::up(L_WIN)),
             vec![Output::Press(L_WIN), Output::Release(L_WIN)]
         );
         // def key に無いキーは挟んでも取り消さない（yamy と同じ）
         let undefined = Key::plain(0x45);
-        assert_eq!(e.feed(Input::down(L_WIN)), vec![]);
-        assert_eq!(e.feed(Input::down(undefined)), vec![]);
-        assert_eq!(e.feed(Input::up(undefined)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(L_WIN)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(undefined)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(undefined)), vec![]);
         assert_eq!(
-            e.feed(Input::up(L_WIN)),
+            feed(&mut e, Input::up(L_WIN)),
             vec![Output::Press(L_WIN), Output::Release(L_WIN)]
         );
     }
@@ -869,8 +913,8 @@ mod tests {
         let (config, global) = base();
         let mut e = engine(config, vec![global]);
 
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(A)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(A)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(A)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(A)]);
     }
 
     #[test]
@@ -888,21 +932,24 @@ mod tests {
 
         // 修飾キー自身は素通し
         assert_eq!(
-            e.feed(Input::down(L_CONTROL)),
+            feed(&mut e, Input::down(L_CONTROL)),
             vec![Output::Press(L_CONTROL)]
         );
         // BackSpace は修飾なしで出すので、OS 側の Control を先に離す
         assert_eq!(
-            e.feed(Input::down(H)),
+            feed(&mut e, Input::down(H)),
             vec![Output::Release(L_CONTROL), Output::Press(BACK_SPACE)]
         );
-        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(BACK_SPACE)]);
+        assert_eq!(
+            feed(&mut e, Input::up(H)),
+            vec![Output::Release(BACK_SPACE)]
+        );
         // Control は既に離れているので何も出ない
-        assert_eq!(e.feed(Input::up(L_CONTROL)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(L_CONTROL)), vec![]);
 
         // 修飾の無い H は素通し
-        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(H)]);
-        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(H)]);
+        assert_eq!(feed(&mut e, Input::down(H)), vec![Output::Press(H)]);
+        assert_eq!(feed(&mut e, Input::up(H)), vec![Output::Release(H)]);
     }
 
     #[test]
@@ -929,23 +976,26 @@ mod tests {
         let mut e = engine(config, vec![global]);
 
         assert_eq!(
-            e.feed(Input::down(CAPS_LOCK)),
+            feed(&mut e, Input::down(CAPS_LOCK)),
             vec![Output::Press(L_CONTROL)]
         );
         assert_eq!(
-            e.feed(Input::down(H)),
+            feed(&mut e, Input::down(H)),
             vec![Output::Release(L_CONTROL), Output::Press(BACK_SPACE)]
         );
-        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(BACK_SPACE)]);
-        assert_eq!(e.feed(Input::up(CAPS_LOCK)), vec![]);
+        assert_eq!(
+            feed(&mut e, Input::up(H)),
+            vec![Output::Release(BACK_SPACE)]
+        );
+        assert_eq!(feed(&mut e, Input::up(CAPS_LOCK)), vec![]);
 
         // CapsLock 単押しは LControl の押し離しになる
         assert_eq!(
-            e.feed(Input::down(CAPS_LOCK)),
+            feed(&mut e, Input::down(CAPS_LOCK)),
             vec![Output::Press(L_CONTROL)]
         );
         assert_eq!(
-            e.feed(Input::up(CAPS_LOCK)),
+            feed(&mut e, Input::up(CAPS_LOCK)),
             vec![Output::Release(L_CONTROL)]
         );
     }
@@ -976,30 +1026,30 @@ mod tests {
         let mut e = engine(config, vec![global, emacs_cx]);
 
         assert_eq!(
-            e.feed(Input::down(L_CONTROL)),
+            feed(&mut e, Input::down(L_CONTROL)),
             vec![Output::Press(L_CONTROL)]
         );
         // C-x: 遷移だけで出力なし
-        assert_eq!(e.feed(Input::down(X)), vec![]);
-        assert_eq!(e.feed(Input::up(X)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(X)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(X)), vec![]);
         assert_eq!(e.current, cx);
         assert!(e.is_prefix);
         // 修飾キーを離しても前置状態は続く
         assert_eq!(
-            e.feed(Input::up(L_CONTROL)),
+            feed(&mut e, Input::up(L_CONTROL)),
             vec![Output::Release(L_CONTROL)]
         );
         assert_eq!(e.current, cx);
         // 次の 1 キーは EmacsC-X で解決される
-        assert_eq!(e.feed(Input::down(F)), vec![Output::Press(RIGHT)]);
+        assert_eq!(feed(&mut e, Input::down(F)), vec![Output::Press(RIGHT)]);
         assert_eq!(e.current, GLOBAL);
         assert!(!e.is_prefix);
         // F の離しは Global で素通し扱いになり Right は残るが、全キーが離れた時点で解放される
-        assert_eq!(e.feed(Input::up(F)), vec![Output::Release(RIGHT)]);
+        assert_eq!(feed(&mut e, Input::up(F)), vec![Output::Release(RIGHT)]);
 
         // 前置が解けた後の F は素通し
-        assert_eq!(e.feed(Input::down(F)), vec![Output::Press(F)]);
-        assert_eq!(e.feed(Input::up(F)), vec![Output::Release(F)]);
+        assert_eq!(feed(&mut e, Input::down(F)), vec![Output::Press(F)]);
+        assert_eq!(feed(&mut e, Input::up(F)), vec![Output::Release(F)]);
     }
 
     #[test]
@@ -1023,17 +1073,17 @@ mod tests {
         config.def_mod(BasicMod::Control, [L_CONTROL]);
         let mut e = engine(config, vec![global]);
         assert_eq!(
-            e.feed(Input::down(L_CONTROL)),
+            feed(&mut e, Input::down(L_CONTROL)),
             vec![Output::Press(L_CONTROL)]
         );
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(A)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(A)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(A)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(A)]);
         assert_eq!(
-            e.feed(Input::up(L_CONTROL)),
+            feed(&mut e, Input::up(L_CONTROL)),
             vec![Output::Release(L_CONTROL)]
         );
         // 修飾なしの A は割付どおり B
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
     }
 
     #[test]
@@ -1061,22 +1111,22 @@ mod tests {
         let mut e = engine(config, vec![global]);
 
         // 状態が分からないうちは IME オフ・変換中でない扱い
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
-        assert_eq!(e.feed(Input::down(F)), vec![Output::Press(F)]);
-        assert_eq!(e.feed(Input::up(F)), vec![Output::Release(F)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(B)]);
+        assert_eq!(feed(&mut e, Input::down(F)), vec![Output::Press(F)]);
+        assert_eq!(feed(&mut e, Input::up(F)), vec![Output::Release(F)]);
 
         // IME オン・変換中でない
         e.set_ime(true, false);
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
-        assert_eq!(e.feed(Input::down(F)), vec![Output::Press(RIGHT)]);
-        assert_eq!(e.feed(Input::up(F)), vec![Output::Release(RIGHT)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(B)]);
+        assert_eq!(feed(&mut e, Input::down(F)), vec![Output::Press(RIGHT)]);
+        assert_eq!(feed(&mut e, Input::up(F)), vec![Output::Release(RIGHT)]);
 
         // 変換中: 既定の割付は効かず、IC- の割付が効く
         e.set_ime(true, true);
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(X)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(X)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(X)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(X)]);
     }
 
     #[test]
@@ -1124,36 +1174,39 @@ mod tests {
 
         // 窓の情報が無いうちは Global だけ
         assert_eq!(e.focus(), &[GLOBAL]);
-        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(H)]);
-        e.feed(Input::up(H));
+        assert_eq!(feed(&mut e, Input::down(H)), vec![Output::Press(H)]);
+        feed(&mut e, Input::up(H));
 
         e.set_focus(0x10, "notepad.exe:Notepad:Edit", "無題 - メモ帳");
         assert_eq!(e.focus(), &[KeymapId(3), KeymapId(2), GLOBAL]);
         // Note で当たる
-        assert_eq!(e.feed(Input::down(X)), vec![Output::Press(B)]);
-        e.feed(Input::up(X));
+        assert_eq!(feed(&mut e, Input::down(X)), vec![Output::Press(B)]);
+        feed(&mut e, Input::up(X));
         // Note → 親 Global → &OtherWindowClass → Edit で当たる
-        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(BACK_SPACE)]);
-        e.feed(Input::up(H));
+        assert_eq!(
+            feed(&mut e, Input::down(H)),
+            vec![Output::Press(BACK_SPACE)]
+        );
+        feed(&mut e, Input::up(H));
         // Note → Global → Edit → 親 EmacsEdit で当たる
-        assert_eq!(e.feed(Input::down(F)), vec![Output::Press(RIGHT)]);
-        e.feed(Input::up(F));
+        assert_eq!(feed(&mut e, Input::down(F)), vec![Output::Press(RIGHT)]);
+        feed(&mut e, Input::up(F));
         // Note → Global で当たる（Global は Note の親として先に引かれる）
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
-        e.feed(Input::up(A));
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+        feed(&mut e, Input::up(A));
         // どこにも無い: 素通し
         assert_eq!(
-            e.feed(Input::down(CAPS_LOCK)),
+            feed(&mut e, Input::down(CAPS_LOCK)),
             vec![Output::Press(CAPS_LOCK)]
         );
-        e.feed(Input::up(CAPS_LOCK));
+        feed(&mut e, Input::up(CAPS_LOCK));
 
         // 別の窓: Global だけに戻る
         e.set_focus(0x20, "chrome.exe:Chrome_WidgetWin_1", "");
         assert_eq!(e.focus(), &[GLOBAL]);
-        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(H)]);
-        e.feed(Input::up(H));
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(feed(&mut e, Input::down(H)), vec![Output::Press(H)]);
+        feed(&mut e, Input::up(H));
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
     }
 
     #[test]
@@ -1186,24 +1239,24 @@ mod tests {
         e.set_focus(0x1234, "x.exe:A", "");
         // 押したときだけ出す
         assert_eq!(
-            e.feed(Input::down(A)),
+            feed(&mut e, Input::down(A)),
             vec![Output::Help {
                 hwnd: 0x1234,
                 text: Some(text)
             }]
         );
-        assert_eq!(e.feed(Input::up(A)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![]);
         assert_eq!(
-            e.feed(Input::down(B)),
+            feed(&mut e, Input::down(B)),
             vec![Output::Help {
                 hwnd: 0x1234,
                 text: None
             }]
         );
-        e.feed(Input::up(B));
+        feed(&mut e, Input::up(B));
         // 本文は &Variable の値
         assert_eq!(
-            e.feed(Input::down(H)),
+            feed(&mut e, Input::down(H)),
             vec![Output::Help {
                 hwnd: 0x1234,
                 text: Some(HelpText {
@@ -1251,15 +1304,15 @@ mod tests {
         let mut e = engine(config, vec![global]);
 
         // 変数が 0 のうちは何も出ない
-        assert_eq!(e.feed(Input::down(B)), vec![]);
-        assert_eq!(e.feed(Input::up(B)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(B)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(B)), vec![]);
 
-        e.feed(Input::down(A));
-        e.feed(Input::up(A));
+        feed(&mut e, Input::down(A));
+        feed(&mut e, Input::up(A));
         assert_eq!(e.variable, 3);
         // 3 回。最後の 1 回は押したまま、離しで離す
         assert_eq!(
-            e.feed(Input::down(B)),
+            feed(&mut e, Input::down(B)),
             vec![
                 Output::Press(X),
                 Output::Release(X),
@@ -1268,13 +1321,13 @@ mod tests {
                 Output::Press(X)
             ]
         );
-        assert_eq!(e.feed(Input::up(B)), vec![Output::Release(X)]);
+        assert_eq!(feed(&mut e, Input::up(B)), vec![Output::Release(X)]);
         // 上限 2
         assert_eq!(
-            e.feed(Input::down(H)),
+            feed(&mut e, Input::down(H)),
             vec![Output::Press(X), Output::Release(X), Output::Press(X)]
         );
-        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(X)]);
+        assert_eq!(feed(&mut e, Input::up(H)), vec![Output::Release(X)]);
     }
 
     #[test]
@@ -1294,7 +1347,7 @@ mod tests {
 
         // A 押し: Global の before-key-down → &Prefix → Sub の prefixed
         assert_eq!(
-            e.feed(Input::down(A)),
+            feed(&mut e, Input::down(A)),
             vec![
                 Output::Press(X),
                 Output::Release(X),
@@ -1304,14 +1357,14 @@ mod tests {
         );
         // A 離し: 離しは Global で引くので Global の after-key-up
         assert_eq!(
-            e.feed(Input::up(A)),
+            feed(&mut e, Input::up(A)),
             vec![Output::Press(H), Output::Release(H)]
         );
         // 次の B は Sub で引く。Sub に before-key-down は無い
-        assert_eq!(e.feed(Input::down(B)), vec![Output::Press(RIGHT)]);
+        assert_eq!(feed(&mut e, Input::down(B)), vec![Output::Press(RIGHT)]);
         // B 離しは Global に戻っているので Global の after-key-up
         assert_eq!(
-            e.feed(Input::up(B)),
+            feed(&mut e, Input::up(B)),
             vec![Output::Release(RIGHT), Output::Press(H), Output::Release(H)]
         );
     }
@@ -1330,15 +1383,15 @@ mod tests {
         subk.assign(H, none, both, any, vec![Action::key(F)]);
         let mut e = engine(config, vec![global, subk]);
 
-        e.feed(Input::down(A));
-        e.feed(Input::up(A));
+        feed(&mut e, Input::down(A));
+        feed(&mut e, Input::up(A));
         // Sub の B は &KeymapWindow → 窓のキーマップ（Global）の B → X
-        assert_eq!(e.feed(Input::down(B)), vec![Output::Press(X)]);
-        assert_eq!(e.feed(Input::up(B)), vec![Output::Release(X)]);
-        e.feed(Input::down(A));
-        e.feed(Input::up(A));
-        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(F)]);
-        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(F)]);
+        assert_eq!(feed(&mut e, Input::down(B)), vec![Output::Press(X)]);
+        assert_eq!(feed(&mut e, Input::up(B)), vec![Output::Release(X)]);
+        feed(&mut e, Input::down(A));
+        feed(&mut e, Input::up(A));
+        assert_eq!(feed(&mut e, Input::down(H)), vec![Output::Press(F)]);
+        assert_eq!(feed(&mut e, Input::up(H)), vec![Output::Release(F)]);
     }
 
     #[test]
@@ -1354,12 +1407,15 @@ mod tests {
         );
         let mut e = engine(config, vec![global]);
         e.set_focus(1, "x.exe:Edit", "");
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Sync, Output::Press(B)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+        assert_eq!(
+            feed(&mut e, Input::down(A)),
+            vec![Output::Sync, Output::Press(B)]
+        );
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(B)]);
         // コンソールでは待たない
         e.set_focus(2, "conhost.exe:ConsoleWindowClass", "");
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(B)]);
     }
 
     #[test]
@@ -1382,18 +1438,18 @@ mod tests {
         let mut e = engine(config, vec![global]);
         e.set_focus(0x1234, "x.exe:A", "");
         assert_eq!(
-            e.feed(Input::down(L_CONTROL)),
+            feed(&mut e, Input::down(L_CONTROL)),
             vec![Output::Press(L_CONTROL)]
         );
         assert_eq!(
-            e.feed(Input::down(X)),
+            feed(&mut e, Input::down(X)),
             vec![Output::Func {
                 hwnd: 0x1234,
                 func: f
             }]
         );
         // 離しでは何も出ない
-        assert_eq!(e.feed(Input::up(X)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(X)), vec![]);
     }
 
     #[test]
@@ -1417,12 +1473,12 @@ mod tests {
             vec![Action::key(H)],
         );
         let mut e = engine(config, vec![global]);
-        assert_eq!(e.feed(Input::down(A)), vec![]);
-        assert_eq!(e.feed(Input::up(A)), vec![]);
-        assert_eq!(e.feed(Input::down(B)), vec![Output::Press(H)]);
-        e.feed(Input::up(B));
+        assert_eq!(feed(&mut e, Input::down(A)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(B)), vec![Output::Press(H)]);
+        feed(&mut e, Input::up(B));
         e.set_lock(LockMod::NumLock, true);
-        assert_eq!(e.feed(Input::down(B)), vec![Output::Press(X)]);
+        assert_eq!(feed(&mut e, Input::down(B)), vec![Output::Press(X)]);
     }
 
     #[test]
@@ -1456,7 +1512,7 @@ mod tests {
         );
         let mut e = engine(config, vec![global]);
         assert_eq!(
-            e.feed(Input::down(A)),
+            feed(&mut e, Input::down(A)),
             vec![Output::Vk {
                 vk: 0x02,
                 extended: false,
@@ -1464,7 +1520,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            e.feed(Input::up(A)),
+            feed(&mut e, Input::up(A)),
             vec![Output::Vk {
                 vk: 0x02,
                 extended: false,
@@ -1472,14 +1528,14 @@ mod tests {
             }]
         );
         assert_eq!(
-            e.feed(Input::down(B)),
+            feed(&mut e, Input::down(B)),
             vec![Output::Vk {
                 vk: 0x0d,
                 extended: true,
                 up: false
             }]
         );
-        assert_eq!(e.feed(Input::up(B)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(B)), vec![]);
     }
 
     #[test]
@@ -1507,14 +1563,14 @@ mod tests {
         keymap_default.default_actions = vec![Action::Default];
         let mut e = engine(config, vec![global, keymap_default]);
 
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
-        e.feed(Input::up(A));
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+        feed(&mut e, Input::up(A));
         // X の次の 1 キーは KeymapDefault で解決: 親が無くても &Default で素通し
-        assert_eq!(e.feed(Input::down(X)), vec![]);
-        e.feed(Input::up(X));
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(A)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(A)]);
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(feed(&mut e, Input::down(X)), vec![]);
+        feed(&mut e, Input::up(X));
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(A)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(A)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
     }
 
     #[test]
@@ -1539,11 +1595,11 @@ mod tests {
         c.add_mod_key(BasicMod::Control, L_CONTROL);
         let mut e = engine(config, vec![global, c]);
 
-        e.feed(Input::down(X));
-        e.feed(Input::up(X));
+        feed(&mut e, Input::down(X));
+        feed(&mut e, Input::up(X));
         // Child に A の割付は無く、親 Global の A = B が使われる
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(B)]);
     }
     #[test]
     fn held_key_is_released_even_if_lock_state_changed() {
@@ -1561,13 +1617,13 @@ mod tests {
         let mut e = engine(config, vec![global]);
 
         // H を押したままにして、全キー解放時の後始末で離されないようにする
-        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(H)]);
+        assert_eq!(feed(&mut e, Input::down(H)), vec![Output::Press(H)]);
         // 変換中でないときに押して B が出る。離す前に変換中になっても B が離される
         e.set_ime(true, false);
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
         e.set_ime(true, true);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
-        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(H)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(B)]);
+        assert_eq!(feed(&mut e, Input::up(H)), vec![Output::Release(H)]);
     }
 
     #[test]
@@ -1584,13 +1640,13 @@ mod tests {
         );
         let mut e = engine(config, vec![global]);
 
-        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(H)]);
+        assert_eq!(feed(&mut e, Input::down(H)), vec![Output::Press(H)]);
         // 変換中に押して X が出る。離す前に変換が終わっても X が離される
         e.set_ime(true, true);
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(X)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(X)]);
         e.set_ime(true, false);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(X)]);
-        assert_eq!(e.feed(Input::up(H)), vec![Output::Release(H)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(X)]);
+        assert_eq!(feed(&mut e, Input::up(H)), vec![Output::Release(H)]);
     }
 
     /// `def subst 左辺 = 置き換え先` を 1 つ作る。
@@ -1672,23 +1728,29 @@ mod tests {
         let mut e = engine(config, vec![global]);
 
         // A は B として引かれる（A の割付は見ない）
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(F)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(F)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(F)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(F)]);
         // 置き換え先で書いた修飾は、押していなくても押している扱いで引く
-        assert_eq!(e.feed(Input::down(F)), vec![Output::Press(BACK_SPACE)]);
-        assert_eq!(e.feed(Input::up(F)), vec![Output::Release(BACK_SPACE)]);
+        assert_eq!(
+            feed(&mut e, Input::down(F)),
+            vec![Output::Press(BACK_SPACE)]
+        );
+        assert_eq!(
+            feed(&mut e, Input::up(F)),
+            vec![Output::Release(BACK_SPACE)]
+        );
         // 鍵も同じ。変換中でなくても変換中として引く
-        assert_eq!(e.feed(Input::down(X)), vec![Output::Press(A)]);
-        assert_eq!(e.feed(Input::up(X)), vec![Output::Release(A)]);
+        assert_eq!(feed(&mut e, Input::down(X)), vec![Output::Press(A)]);
+        assert_eq!(feed(&mut e, Input::up(X)), vec![Output::Release(A)]);
         // 割付が無ければ置き換えた後のキーを出す。dontcare の修飾は入力のまま
         assert_eq!(
-            e.feed(Input::down(L_CONTROL)),
+            feed(&mut e, Input::down(L_CONTROL)),
             vec![Output::Press(L_CONTROL)]
         );
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(B)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(B)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(B)]);
         assert_eq!(
-            e.feed(Input::up(L_CONTROL)),
+            feed(&mut e, Input::up(L_CONTROL)),
             vec![Output::Release(L_CONTROL)]
         );
     }
@@ -1707,32 +1769,32 @@ mod tests {
         let mut e = engine(config, vec![global]);
 
         // 左辺の修飾に合わなければ置き換えない
-        assert_eq!(e.feed(Input::down(A)), vec![Output::Press(A)]);
-        assert_eq!(e.feed(Input::up(A)), vec![Output::Release(A)]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(A)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(A)]);
         // 以下、X を押したままにして「物理キーが全部離れたら全部離す」が効かないようにする。
         // C-A は B（置き換え先は修飾なしなので Control を離して出す）。
         // Control を先に離すと、A の離しは置き換わらず A として引かれ、B は離されない（yamy と同じ）
-        assert_eq!(e.feed(Input::down(X)), vec![Output::Press(X)]);
+        assert_eq!(feed(&mut e, Input::down(X)), vec![Output::Press(X)]);
         assert_eq!(
-            e.feed(Input::down(L_CONTROL)),
+            feed(&mut e, Input::down(L_CONTROL)),
             vec![Output::Press(L_CONTROL)]
         );
         assert_eq!(
-            e.feed(Input::down(A)),
+            feed(&mut e, Input::down(A)),
             vec![Output::Release(L_CONTROL), Output::Press(B)]
         );
-        assert_eq!(e.feed(Input::up(L_CONTROL)), vec![]);
-        assert_eq!(e.feed(Input::up(A)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(L_CONTROL)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![]);
         assert_eq!(
-            e.feed(Input::up(X)),
+            feed(&mut e, Input::up(X)),
             vec![Output::Release(X), Output::Release(B)]
         );
         // D- の左辺は押しだけ置き換わる。離しは H として引かれ、F は離されない
-        assert_eq!(e.feed(Input::down(X)), vec![Output::Press(X)]);
-        assert_eq!(e.feed(Input::down(H)), vec![Output::Press(F)]);
-        assert_eq!(e.feed(Input::up(H)), vec![]);
+        assert_eq!(feed(&mut e, Input::down(X)), vec![Output::Press(X)]);
+        assert_eq!(feed(&mut e, Input::down(H)), vec![Output::Press(F)]);
+        assert_eq!(feed(&mut e, Input::up(H)), vec![]);
         assert_eq!(
-            e.feed(Input::up(X)),
+            feed(&mut e, Input::up(X)),
             vec![Output::Release(X), Output::Release(F)]
         );
     }

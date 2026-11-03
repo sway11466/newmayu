@@ -1,7 +1,7 @@
 //! 窓を操作する `&関数`（`&WindowMove` など）と `&MouseMove`・`&MouseWheel` の Win32 側。
 //! yamy の function.cpp の funcWindow* と windowstool.cpp を写している。
 //!
-//! エンジンは OS を触らず、[`Output::Func`] に「フォーカス窓」と「何をするか」を乗せて返す。
+//! エンジンは OS を触らず、[`Output::Func`] に「フォーカス窓」と「何をするか」を乗せて渡す。
 //! ここがそれを受け、対象の窓（最上位の窓、または MDI 子窓）を探して動かす。
 
 use windows::Win32::Foundation::{COLORREF, HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT, WPARAM};

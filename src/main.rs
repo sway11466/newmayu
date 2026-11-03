@@ -39,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::HSTRING;
 
 use newmayu::config::parser;
-use newmayu::engine::{Engine, Input, Output};
+use newmayu::engine::{Engine, Input, Os, Output};
 use newmayu::help::Help;
 use newmayu::log;
 use newmayu::model::{Config, Key, LockMod};
@@ -223,6 +223,48 @@ fn wait_sync(sync: Option<Key>, rx: &Receiver<Event>, pending: &mut VecDeque<Eve
     log!("&Sync: {SYNC_WAIT:?} 待っても届かなかった");
 }
 
+/// エンジンの出力を出た順に実行する OS 窓口。キーは溜めておき、関数・`&Sync` の前と
+/// 1 入力の最後にまとめて `SendInput` する。
+struct Exec<'a> {
+    sync: Option<Key>,
+    /// まだ送っていないキー。
+    keys: Vec<Output>,
+    /// ログ用に、この入力で出た全部。
+    all: Vec<Output>,
+    window_ops: &'a mut WindowOps,
+    help: &'a Help,
+    pressed: &'a mut Pressed,
+    rx: &'a Receiver<Event>,
+    pending: &'a mut VecDeque<Event>,
+}
+
+impl Exec<'_> {
+    fn flush(&mut self) {
+        platform::send(&self.keys);
+        self.keys.clear();
+    }
+}
+
+impl Os for Exec<'_> {
+    fn output(&mut self, o: Output) {
+        self.all.push(o.clone());
+        self.pressed.track(std::slice::from_ref(&o));
+        match o {
+            Output::Press(_) | Output::Release(_) | Output::Vk { .. } => self.keys.push(o),
+            Output::Func { .. } | Output::Help { .. } => {
+                self.flush();
+                let one = std::slice::from_ref(&o);
+                self.window_ops.run(one);
+                self.help.run(one);
+            }
+            Output::Sync => {
+                self.flush();
+                wait_sync(self.sync, self.rx, self.pending);
+            }
+        }
+    }
+}
+
 /// エンジンスレッドの本体。`Quit` で押下中のキーを離して抜ける。
 fn engine_thread(config: Config, rx: Receiver<Event>, sync_share: SyncShare, help: Help) {
     let mut engine = Engine::new(config);
@@ -251,22 +293,19 @@ fn engine_thread(config: Config, rx: Receiver<Event>, sync_share: SyncShare, hel
                 log!("再読込: エンジンを作り直した");
             }
             Event::Key(input) => {
-                let outputs = engine.feed(input);
-                log!("{input:?} -> {outputs:?}");
-                pressed.track(&outputs);
-                // &Sync の所で区切り、区切りごとに出してから待つ
-                for seg in outputs.split_inclusive(|o| *o == Output::Sync) {
-                    let (body, sync) = match seg.split_last() {
-                        Some((Output::Sync, body)) => (body, true),
-                        _ => (seg, false),
-                    };
-                    platform::send(body);
-                    window_ops.run(body);
-                    help.run(body);
-                    if sync {
-                        wait_sync(engine.config().sync, &rx, &mut pending);
-                    }
-                }
+                let mut exec = Exec {
+                    sync: engine.config().sync,
+                    keys: Vec::new(),
+                    all: Vec::new(),
+                    window_ops: &mut window_ops,
+                    help: &help,
+                    pressed: &mut pressed,
+                    rx: &rx,
+                    pending: &mut pending,
+                };
+                engine.feed(input, &mut exec);
+                exec.flush();
+                log!("{input:?} -> {:?}", exec.all);
             }
             Event::Notify(n) => {
                 let h = n.header;
