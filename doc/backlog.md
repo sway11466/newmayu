@@ -4,7 +4,7 @@
 
 ## index
 
-次回採番: bug=2 / feature=15 / refactoring=1.
+次回採番: bug=2 / feature=16 / refactoring=1.
 
 項目（バグ bug / 機能追加 feature / リファクタリング refactoring）を追加するときは、該当カテゴリの採番を +1 して ID を継ぐ。完了した項目は本書から削除し、番号は再利用しない（過去の使用済み番号は `git log -p -- doc/backlog.md | grep -oE '(bug|feature|refactoring)-[0-9]+' | sort -u` で確認できる）。状態は「本書に載っていれば未完了／消えていれば完了」で表す（状態列は持たない）。ゴールは、その作業で何が達成されていれば終わりなのかを1文で書く。手段ではなく到達点を書く。
 
@@ -65,6 +65,14 @@
 - 背景：オーナーの MDIE.mayu・tablacus.mayu がファイラを開くのに使う。いまは読み込みエラーにしている。
 - 対応：(1) パーサーに足す（show_command は `ShowNormal` などの名前）。(2) Win32 の `ShellExecuteW` を呼ぶ。
 - 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
+
+### feature-15
+
+**ブラウザの入力欄での &Recenter**
+- ゴール：ブラウザの複数行の入力欄でも、C-L でキャレット行が画面の中央に来る。
+- 背景：yamy の `&Recenter` はクラス名が `Edit` / `RichEdit…` の複数行の窓にしか効かない。ブラウザの入力欄はブラウザが自分で描いているので、`EM_LINESCROLL` などのメッセージが届かない。yamy に無い挙動になる。
+- 対応：候補は (1) UI Automation の `ScrollIntoView`（寄せられるのは上端か下端だけ）、(2) newmayu と一緒に配るブラウザ拡張（JavaScript で中央寄せ。ブラウザごとに作る）。未決：やるかどうか、どちらで実現するか。
+- 該当：未定。
 
 ## リファクタリング
 
