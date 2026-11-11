@@ -19,6 +19,11 @@ pub enum Kind {
     Sync,
 }
 
+/// 本体から DLL へ命令を送る登録メッセージ（`RegisterWindowMessageW`）の名前。`wParam` が命令の番号。
+pub const COMMAND_MESSAGE_NAME: &str = "newmayu-command";
+/// 命令: `&Recenter`。
+pub const COMMAND_RECENTER: usize = 1;
+
 /// 同期キーを DLL に知らせる共有メモリの名前。本体が作り、DLL が読む。
 pub const SYNC_SHARE_NAME: &str = r"Local\newmayu-sync";
 /// 共有メモリの中身: `[u32 スキャンコード][u32 拡張(E0/E1)なら 1]`（LE）。スキャンコード 0 = 同期キー無し。

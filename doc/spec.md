@@ -130,7 +130,7 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | `&SetImeStatus([on\|off\|toggle])` | IME のオン・オフ | × | |
 | `&SetImeString(文字列)` | IME 経由で文字列を入力する | × | |
 | `&EmacsEditKillLineFunc` / `&EmacsEditKillLinePred(動作列1, 動作列2)` | emacs の kill-line を Edit / IE の中で実現する一組（マニュアルに手順の説明がある） | ○ | |
-| `&Recenter` | Edit / RichEdit でキャレット行を縦の中央に | × | feature-6 |
+| `&Recenter` | Edit / RichEdit でキャレット行を縦の中央に | ○ | |
 
 ### 本体の UI・外部連携
 

@@ -6,6 +6,7 @@
 //! 本体のメールスロットに通知を書く。同期キーのスキャンコードは本体が共有メモリ
 //! （`SYNC_SHARE_NAME`）に置き、最初のキー離しで読む。フォーカスの通知には、フォーカス窓から親をたどったクラス名の列
 //! （`exe名:クラス:…:クラス`）とタイトルの列を載せる（yamy の `getClassNameTitleName`）。
+//! 本体からの命令（`&Recenter`）は登録メッセージで届き、`WH_GETMESSAGE` で受ける。
 //!
 //! 他プロセスの中で動くので、やることを最小にする:
 //! - 状態は atomic の static だけ。ヒープも std のスレッドローカルも使わない
@@ -15,12 +16,13 @@
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use newmayu_ipc::{
-    CAPS_LOCK, Header, IME_COMPOSING, IME_OPEN, KANA_LOCK, Kind, MAILSLOT_NAME, MAX_NAME, MAX_SIZE,
-    NUM_LOCK, SCROLL_LOCK, SYNC_SHARE_NAME, SYNC_SHARE_SIZE, read_sync_share, write_focus,
-    write_lock,
+    CAPS_LOCK, COMMAND_MESSAGE_NAME, COMMAND_RECENTER, Header, IME_COMPOSING, IME_OPEN, KANA_LOCK,
+    Kind, MAILSLOT_NAME, MAX_NAME, MAX_SIZE, NUM_LOCK, SCROLL_LOCK, SYNC_SHARE_NAME,
+    SYNC_SHARE_SIZE, read_sync_share, write_focus, write_lock,
 };
 use windows::Win32::Foundation::{
-    GENERIC_WRITE, HANDLE, HINSTANCE, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM,
+    GENERIC_WRITE, HANDLE, HINSTANCE, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, POINTL, RECT,
+    WPARAM,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, OPEN_EXISTING, WriteFile,
@@ -28,6 +30,8 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::Memory::{FILE_MAP_READ, MapViewOfFile, OpenFileMappingW};
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Controls::RichEdit::EM_EXLINEFROMCHAR;
+use windows::Win32::UI::Controls::{EM_CHARFROMPOS, EM_LINEFROMCHAR, EM_LINESCROLL};
 use windows::Win32::UI::Input::Ime::{
     IMN_SETOPENSTATUS, ImmGetContext, ImmGetOpenStatus, ImmReleaseContext,
 };
@@ -35,7 +39,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, VK_CAPITAL, VK_KANA, VK_NUMLOCK, VK_SCROLL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CWPSTRUCT, CallNextHookEx, GetClassNameW, GetParent, GetWindowTextW, HHOOK, MSG, PM_REMOVE,
+    CWPSTRUCT, CallNextHookEx, ES_MULTILINE, GWL_STYLE, GetClassNameW, GetClientRect, GetParent,
+    GetWindowLongW, GetWindowTextW, HHOOK, MSG, PM_REMOVE, RegisterWindowMessageW, SendMessageW,
     SetWindowsHookExW, UnhookWindowsHookEx, WA_INACTIVE, WH_CALLWNDPROC, WH_GETMESSAGE,
     WM_ACTIVATE, WM_ACTIVATEAPP, WM_ENTERMENULOOP, WM_EXITMENULOOP, WM_IME_ENDCOMPOSITION,
     WM_IME_NOTIFY, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_MOUSEACTIVATE, WM_NCACTIVATE,
@@ -61,6 +66,8 @@ static SEND_FAILURES: AtomicU32 = AtomicU32::new(0);
 static FOCUS_HWND: AtomicIsize = AtomicIsize::new(0);
 /// メニューを開いている（yamy は名前の列に `MENU` を足す）。
 static IN_MENU: AtomicBool = AtomicBool::new(false);
+/// 本体からの命令の登録メッセージ。0 = まだ登録していない。
+static COMMAND_MESSAGE: AtomicU32 = AtomicU32::new(0);
 /// 同期キーの共有メモリを写したアドレス。0 = まだ開いていない、-1 = 開けなかった。
 static SYNC_VIEW: AtomicIsize = AtomicIsize::new(0);
 
@@ -118,6 +125,9 @@ unsafe extern "system" fn get_message_proc(code: i32, wparam: WPARAM, lparam: LP
         // SAFETY: WH_GETMESSAGE では lparam は MSG を指す。
         let msg = unsafe { &*(lparam.0 as *const MSG) };
         on_message(msg.hwnd, msg.message, msg.wParam, msg.lParam, 0);
+        if msg.message == command_message() && msg.wParam.0 == COMMAND_RECENTER {
+            recenter(msg.hwnd);
+        }
     }
     // SAFETY: 引数はそのまま次のフックへ渡す。
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -184,6 +194,95 @@ fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, cause_ba
         }
         _ => {}
     }
+}
+
+/// 本体からの命令の登録メッセージ。
+fn command_message() -> u32 {
+    let m = COMMAND_MESSAGE.load(Ordering::Relaxed);
+    if m != 0 {
+        return m;
+    }
+    let mut name: [u16; 64] = [0; 64];
+    for (i, u) in COMMAND_MESSAGE_NAME.encode_utf16().enumerate() {
+        name[i] = u;
+    }
+    // SAFETY: name は NUL 終端の UTF-16。
+    let m = unsafe { RegisterWindowMessageW(PCWSTR(name.as_ptr())) };
+    COMMAND_MESSAGE.store(m, Ordering::Relaxed);
+    m
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditKind {
+    Edit,
+    RichEdit,
+}
+
+/// クラス名から編集コントロールの種類を判定する。yamy の funcRecenter と同じく大文字小文字を区別しない。
+fn edit_kind(class: &[u16]) -> Option<EditKind> {
+    let starts_with = |prefix: &str| {
+        let mut c = class.iter();
+        prefix.encode_utf16().all(|p| {
+            c.next().is_some_and(|&u| {
+                let lower = if (0x41..=0x5a).contains(&u) {
+                    u + 0x20
+                } else {
+                    u
+                };
+                lower == p
+            })
+        })
+    };
+    if class.len() == 4 && starts_with("edit") {
+        Some(EditKind::Edit)
+    } else if starts_with("richedit") {
+        Some(EditKind::RichEdit)
+    } else {
+        None
+    }
+}
+
+/// 窓へ送って結果を i32 で受ける。
+fn edit_message(hwnd: HWND, message: u32, wparam: usize, lparam: isize) -> i32 {
+    // SAFETY: 有効な窓ハンドル。lparam の指す先は呼ぶ側が送り終わるまで持つ。
+    let r = unsafe { SendMessageW(hwnd, message, Some(WPARAM(wparam)), Some(LPARAM(lparam))) };
+    r.0 as i32
+}
+
+/// `&Recenter`: キャレット行が縦の中央に来るようスクロールする（yamy の hook.cpp の funcRecenter）。
+/// RichEdit の `EM_CHARFROMPOS` はポインタを渡すので、対象のプロセスの中で送る。
+fn recenter(hwnd: HWND) {
+    let mut class = [0u16; 256];
+    // SAFETY: 書き込み先はスタックの配列。
+    let n = unsafe { GetClassNameW(hwnd, &mut class) };
+    let Some(kind) = edit_kind(&class[..n.max(0) as usize]) else {
+        return;
+    };
+    // SAFETY: 引数は値だけ。
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) };
+    if style & ES_MULTILINE == 0 {
+        return;
+    }
+    let mut rc = RECT::default();
+    // SAFETY: 書き込み先はスタックの変数。
+    let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+    let p = POINTL {
+        x: (rc.right + rc.left) / 2,
+        y: (rc.top + rc.bottom) / 2,
+    };
+    let line = match kind {
+        EditKind::Edit => {
+            let pos = ((p.y as u32 & 0xffff) << 16) | (p.x as u32 & 0xffff);
+            let r = edit_message(hwnd, EM_CHARFROMPOS, 0, pos as isize);
+            (r as u32 >> 16) as i32
+        }
+        EditKind::RichEdit => {
+            let ci = edit_message(hwnd, EM_CHARFROMPOS, 0, &raw const p as isize);
+            edit_message(hwnd, EM_EXLINEFROMCHAR, 0, ci as isize)
+        }
+    };
+    let caret = edit_message(hwnd, EM_LINEFROMCHAR, usize::MAX, 0);
+    edit_message(hwnd, EM_LINESCROLL, 0, (caret - line) as isize);
 }
 
 /// このスレッドのフォーカス窓が変わっていれば（`force` なら必ず）、名前の列を付けて通知する。
@@ -438,5 +537,27 @@ fn open_mailslot() -> isize {
     match h {
         Ok(h) if h != INVALID_HANDLE_VALUE => h.0 as isize,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kind(class: &str) -> Option<EditKind> {
+        let u: Vec<u16> = class.encode_utf16().collect();
+        edit_kind(&u)
+    }
+
+    #[test]
+    fn edit_kind_follows_class_name() {
+        assert_eq!(kind("Edit"), Some(EditKind::Edit));
+        assert_eq!(kind("EDIT"), Some(EditKind::Edit));
+        assert_eq!(kind("RichEdit20W"), Some(EditKind::RichEdit));
+        assert_eq!(kind("RICHEDIT"), Some(EditKind::RichEdit));
+        assert_eq!(kind("Edit2"), None);
+        assert_eq!(kind("Rich"), None);
+        assert_eq!(kind("Button"), None);
+        assert_eq!(kind(""), None);
     }
 }

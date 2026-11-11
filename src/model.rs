@@ -683,6 +683,8 @@ pub enum Func {
     WindowSetAlpha(i32),
     /// `&WindowRedraw`: 再描画。
     WindowRedraw,
+    /// `&Recenter`: Edit / RichEdit でキャレット行を縦の中央に。
+    Recenter,
     /// `&WindowResizeTo(幅, 高さ [, 対象])`: 0 はそのまま、負なら作業領域からの差。
     WindowResizeTo {
         width: i32,

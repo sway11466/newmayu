@@ -4,6 +4,7 @@
 //! エンジンは OS を触らず、[`Output::Func`] に「フォーカス窓」と「何をするか」を乗せて渡す。
 //! ここがそれを受け、対象の窓（最上位の窓、または MDI 子窓）を探して動かす。
 
+use newmayu_ipc::{COMMAND_MESSAGE_NAME, COMMAND_RECENTER};
 use windows::Win32::Foundation::{COLORREF, HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN,
@@ -20,11 +21,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetCursorPos, GetParent, GetWindowLongPtrW,
     GetWindowRect, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic, IsWindow,
-    IsZoomed, LWA_ALPHA, MB_OK, PostMessageW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE,
-    SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
-    SetCursorPos, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, WM_SYSCOMMAND,
-    WS_CHILD, WS_EX_LAYERED, WS_EX_MDICHILD, WS_EX_TOPMOST,
+    IsZoomed, LWA_ALPHA, MB_OK, PostMessageW, RegisterWindowMessageW, SC_CLOSE, SC_MAXIMIZE,
+    SC_MINIMIZE, SC_RESTORE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
+    SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetLayeredWindowAttributes, SetWindowLongPtrW,
+    SetWindowPos, WM_SYSCOMMAND, WS_CHILD, WS_EX_LAYERED, WS_EX_MDICHILD, WS_EX_TOPMOST,
 };
+use windows::core::PCWSTR;
 
 use crate::engine::Output;
 use crate::model::{Func, Gravity, Target, ToWindow};
@@ -152,6 +154,7 @@ impl WindowOps {
                     redraw(hwnd);
                 }
             }
+            Func::Recenter => recenter(focus),
             Func::WindowResizeTo {
                 width: w,
                 height: h,
@@ -520,6 +523,21 @@ fn set_pos_z(hwnd: HWND, after: HWND) {
             SWP_ASYNCWINDOWPOS | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOSIZE,
         )
     };
+}
+
+/// `&Recenter`: フォーカス窓へ命令を送る。スクロールはそのプロセスの中のフック DLL がする。
+fn recenter(focus: HWND) {
+    let name: Vec<u16> = COMMAND_MESSAGE_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: name は NUL 終端の UTF-16。
+    let message = unsafe { RegisterWindowMessageW(PCWSTR(name.as_ptr())) };
+    if message == 0 {
+        return;
+    }
+    // SAFETY: 有効な窓ハンドル。
+    let _ = unsafe { PostMessageW(Some(focus), message, WPARAM(COMMAND_RECENTER), LPARAM(0)) };
 }
 
 fn sys_command(hwnd: HWND, cmd: u32) {

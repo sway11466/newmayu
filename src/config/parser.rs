@@ -1257,6 +1257,7 @@ impl Loader {
             "mousewheel" => 1,
             "windowtoggletopmost"
             | "windowredraw"
+            | "recenter"
             | "undefined"
             | "clipboardupcaseword"
             | "clipboarddowncaseword" => 0,
@@ -1317,6 +1318,7 @@ impl Loader {
             },
             "windowsetalpha" => Func::WindowSetAlpha(a.int(0)?),
             "windowredraw" => Func::WindowRedraw,
+            "recenter" => Func::Recenter,
             "clipboardupcaseword" => Func::ClipboardUpcaseWord,
             "clipboarddowncaseword" => Func::ClipboardDowncaseWord,
             "windowresizeto" => Func::WindowResizeTo {
@@ -2072,7 +2074,7 @@ keymap Sub : Global"
              key B = &WindowMove(1, 2, MDI)
              key H = &WindowLower &WindowRaise(mdi) &WindowMaximize
              key Space = &WindowClingToLeft &WindowClingToBottom(MDI)
-             key BackSpace = &WindowSetAlpha(70) &WindowToggleTopMost &WindowRedraw
+             key BackSpace = &WindowSetAlpha(70) &WindowToggleTopMost &WindowRedraw &Recenter
              key LShift = &MouseMove(0, -1) &WindowResizeTo(0, -100)
              key RShift = &WindowMoveTo(NE, 3, 4)
              key LControl = &Ignore &Undefined",
@@ -2126,6 +2128,7 @@ keymap Sub : Global"
                 Action::Func(Func::WindowSetAlpha(70)),
                 Action::Func(Func::WindowToggleTopMost),
                 Action::Func(Func::WindowRedraw),
+                Action::Func(Func::Recenter),
             ]
         );
         assert_eq!(
@@ -2194,6 +2197,11 @@ keymap Sub : Global"
         );
         assert!(
             load_err("key A = &WindowRedraw()")
+                .message
+                .contains("引数が多い")
+        );
+        assert!(
+            load_err("key A = &Recenter()")
                 .message
                 .contains("引数が多い")
         );
