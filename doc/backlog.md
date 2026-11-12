@@ -34,14 +34,6 @@
 - 対応：TSF の `ITfThreadMgr` / `ITfContext` の状態を DLL の中から読む、または `ITfUIElementSink` 系の通知を受ける方法を調べ、取れる方法で DLL に足す。
 - 該当：`hook/src/lib.rs`・`ipc/src/lib.rs`。
 
-### feature-11
-
-**&Keymap**
-- ゴール：`&Keymap(名前)` を含む `.mayu` が読め、押すと yamy と同じく指定のキーマップで引き直す。
-- 背景：オーナーの Excel.mayu が C-c / C-x に使う。いまは読み込みエラーにしている。
-- 対応：(1) パーサーに足す。(2) エンジンで指定のキーマップで引き直す（`&KeymapParent` と同じ流れ）。
-- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
-
 ### feature-12
 
 **&DescribeBindings**

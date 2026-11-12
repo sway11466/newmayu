@@ -542,6 +542,9 @@ impl Engine {
                     self.generate_event(os, EventKind::Prefixed, *target, cur, depth + 1);
                 }
             }
+            Action::Keymap(target) => {
+                self.generate_keyboard_events(os, *target, cur, edge, depth + 1)
+            }
             Action::Default => self.generate_default(os, key, event_mods, edge),
             Action::KeymapParent => match self.config.keymap(keymap_id).parent {
                 Some(parent) => self.generate_keyboard_events(os, parent, cur, edge, depth + 1),
@@ -1620,6 +1623,25 @@ mod tests {
         feed(&mut e, Input::up(A));
         assert_eq!(feed(&mut e, Input::down(H)), vec![Output::Press(F)]);
         assert_eq!(feed(&mut e, Input::up(H)), vec![Output::Release(F)]);
+    }
+
+    #[test]
+    fn keymap_resolves_the_same_key_in_the_named_keymap() {
+        let (config, mut global) = base();
+        let (none, both, any) = (ModSpec::none(), EdgeSpec::Both, LockSpec::any());
+        // key A = &Keymap(Sub)
+        global.assign(A, none, both, any, vec![Action::Keymap(KeymapId(1))]);
+        // keymap Sub: key A = X   key B = H
+        let mut subk = Keymap::new("Sub", None);
+        subk.assign(A, none, both, any, vec![Action::key(X)]);
+        subk.assign(B, none, both, any, vec![Action::key(H)]);
+        let mut e = engine(config, vec![global, subk]);
+
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(X)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![Output::Release(X)]);
+        // &Prefix と違い、次のキーは元のキーマップ（Global）で引く
+        assert_eq!(feed(&mut e, Input::down(B)), vec![Output::Press(B)]);
+        assert_eq!(feed(&mut e, Input::up(B)), vec![Output::Release(B)]);
     }
 
     #[test]

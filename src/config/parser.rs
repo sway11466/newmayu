@@ -1210,6 +1210,10 @@ impl Loader {
                         out.push(Action::HelpVariable(a.string(0)?));
                         continue;
                     }
+                    if fname.eq_ignore_ascii_case("Keymap") {
+                        out.push(Action::Keymap(self.load_keymap_arg(cur, "Keymap")?));
+                        continue;
+                    }
                     if let Some(f) = self.load_func(&fname, cur)? {
                         out.push(Action::Func(f));
                         continue;
@@ -1217,16 +1221,7 @@ impl Loader {
                     if !fname.eq_ignore_ascii_case("Prefix") {
                         return self.err(format!("`&{fname}` は未対応"));
                     }
-                    self.expect_sym(cur, "(")?;
-                    let Some(t) = cur.next() else {
-                        return self.err("&Prefix( の後はキーマップ名");
-                    };
-                    let kname = self.name_of(t)?;
-                    let Some(&idx) = self.keymap_names.get(&lower(&kname)) else {
-                        return self.err(format!("キーマップ `{kname}` は未定義"));
-                    };
-                    self.expect_sym(cur, ")")?;
-                    out.push(Action::Prefix(KeymapId(idx)));
+                    out.push(Action::Prefix(self.load_keymap_arg(cur, "Prefix")?));
                 }
                 t => {
                     let key = self.key_by_name(t)?;
@@ -1247,6 +1242,20 @@ impl Loader {
 
     /// OS 側で実行する `&関数` とその引数。知らない名前なら `None`。
     /// 引数の `( … )` は省略でき、省略した引数は yamy と同じ既定値になる。
+    /// `&Prefix(名前)` / `&Keymap(名前)` の `(名前)`。名前は定義済みのキーマップ。
+    fn load_keymap_arg(&self, cur: &mut Cur, what: &str) -> Result<KeymapId> {
+        self.expect_sym(cur, "(")?;
+        let Some(t) = cur.next() else {
+            return self.err(format!("&{what}( の後はキーマップ名"));
+        };
+        let kname = self.name_of(t)?;
+        let Some(&idx) = self.keymap_names.get(&lower(&kname)) else {
+            return self.err(format!("キーマップ `{kname}` は未定義"));
+        };
+        self.expect_sym(cur, ")")?;
+        Ok(KeymapId(idx))
+    }
+
     fn load_func(&self, fname: &str, cur: &mut Cur) -> Result<Option<Func>> {
         let lname = lower(fname);
         // 引数の最大数。知らない名前は None（引数を読まずに返す）
@@ -1813,6 +1822,23 @@ mod tests {
         let cb = only(main, B);
         assert!(cb.mods.is_pressed(BasicMod::Control));
         assert_eq!(cb.actions, vec![Action::Default]);
+    }
+
+    #[test]
+    fn keymap_names_a_defined_keymap() {
+        let c = load_ok(
+            "keymap Sub
+              key B = A
+             keymap Main
+              key A = &Keymap(sub)",
+        );
+        let main = &c.keymaps[2];
+        assert_eq!(only(main, A).actions, vec![Action::Keymap(KeymapId(1))]);
+        assert!(
+            load_err("key A = &Keymap(Nowhere)")
+                .message
+                .contains("未定義")
+        );
     }
 
     #[test]
