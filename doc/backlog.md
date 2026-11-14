@@ -42,14 +42,6 @@
 - 対応：(1) パーサーに足す。(2) いまのキーマップと親の割付を並べて出す。未決：出し先（ログだけか、窓を出すか）。
 - 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
 
-### feature-13
-
-**&ShellExecute**
-- ゴール：`&ShellExecute(operation, file, parameters, directory, show_command)` を含む `.mayu` が読め、押すと yamy と同じくプログラムやファイルが開く。
-- 背景：オーナーの MDIE.mayu・tablacus.mayu がファイラを開くのに使う。いまは読み込みエラーにしている。
-- 対応：(1) パーサーに足す（show_command は `ShowNormal` などの名前）。(2) Win32 の `ShellExecuteW` を呼ぶ。
-- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
-
 ### feature-15
 
 **ブラウザの入力欄での &Recenter**
@@ -61,6 +53,12 @@
 ## リファクタリング
 
 挙がった改善項目。採番は本書冒頭「index」。各エントリは 背景／ゴール／対応／該当 で記す。
+
+## テスト未実行
+
+実装したが、`cargo test` を回せていないもの。回して通れば本書から消す。
+
+- &ShellExecute：Smart App Control がテストの exe を止める（4551）ので、テストを一度も回せないままコミットした。
 
 ## 実機で未確認
 

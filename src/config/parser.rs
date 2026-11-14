@@ -17,7 +17,7 @@
 //!                                              # WINDOW = /クラス/ | ( /クラス/ && /タイトル/ ) | ( /クラス/ || /タイトル/ )
 //! event (prefixed|before-key-down|after-key-up) = ACTION...
 //!                                              # いまのキーマップの event。prefixed は遷移先のキーマップのものが動く
-//! key MODKEY... = ACTION...                    # ACTION = 修飾付きキー名 | $keyseq名 | ( ACTION... ) | &Prefix(KEYMAP)
+//! key MODKEY... = ACTION...                    # ACTION = 修飾付きキー名 | $keyseq名 | ( ACTION... ) | &Prefix(KEYMAP) | &Keymap(KEYMAP)
 //!                                              #        | &Default | &KeymapParent | &OtherWindowClass | &KeymapWindow
 //!                                              #        | &Window…([引数]) | &MouseMove(dx, dy)   （model::Func 参照）
 //!                                              #        | &Ignore | &Undefined | &VK([E-][D-|U-]名前|番号)
@@ -25,6 +25,7 @@
 //!                                              #        | &Variable(mag, inc) | &Repeat(( ACTION... ) | $keyseq名 [, 上限])
 //!                                              #        | &Sync | &ClipboardUpcaseWord | &ClipboardDowncaseWord
 //!                                              #        | &HelpMessage(["タイトル" [, "本文"]]) | &HelpVariable("タイトル")
+//!                                              #        | &ShellExecute(操作, ファイル, パラメータ, フォルダ, 窓の出し方)
 //!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）
 //!                                              # NL- CL- SL- KL-（NumLock CapsLock ScrollLock カナ）も書ける
 //! mod MODNAME (=|+=|-=) [!!]KEY...                # !! はワンショット（単独で押して離したらそのキー）
@@ -51,8 +52,8 @@ use super::lexer::{Line, Token, tokenize};
 use super::vkeys::vk_by_name;
 use crate::model::{
     Action, BasicMod, Config, EdgeSpec, EventKind, Func, Gravity, HelpText, Key, Keymap, KeymapId,
-    LockMod, LockSpec, ModSpec, ScanCode, ScanPrefix, Subst, Target, ToWindow, WindowMatch,
-    WindowOp,
+    LockMod, LockSpec, ModSpec, ScanCode, ScanPrefix, ShellExecute, ShowCommand, Subst, Target,
+    ToWindow, WindowMatch, WindowOp,
 };
 
 /// 最大の include 深さ。循環 include もこれで止まる。
@@ -308,6 +309,36 @@ impl Args<'_> {
                 i + 1
             )),
         }
+    }
+
+    fn show_command(&self, i: usize) -> Result<ShowCommand> {
+        let Some(t) = self.args.get(i) else {
+            return self.loader.err(format!(
+                "`&{}`: {} 番目の引数（窓の出し方）が無い",
+                self.fname,
+                i + 1
+            ));
+        };
+        let name = self.loader.name_of(t)?;
+        Ok(match lower(&name).as_str() {
+            "hide" => ShowCommand::Hide,
+            "maximize" => ShowCommand::Maximize,
+            "minimize" => ShowCommand::Minimize,
+            "restore" => ShowCommand::Restore,
+            "show" => ShowCommand::Show,
+            "showdefault" => ShowCommand::ShowDefault,
+            "showmaximized" => ShowCommand::ShowMaximized,
+            "showminimized" => ShowCommand::ShowMinimized,
+            "showminnoactive" => ShowCommand::ShowMinNoActive,
+            "showna" => ShowCommand::ShowNA,
+            "shownoactivate" => ShowCommand::ShowNoActivate,
+            "shownormal" => ShowCommand::ShowNormal,
+            _ => {
+                return self
+                    .loader
+                    .err(format!("`&{}`: 窓の出し方が不明: `{name}`", self.fname));
+            }
+        })
     }
 
     /// 省略時は `Overlapped`。
@@ -1208,6 +1239,30 @@ impl Loader {
                             return self.err("`&HelpVariable`: 1 番目の引数（文字列）が無い");
                         }
                         out.push(Action::HelpVariable(a.string(0)?));
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("ShellExecute") {
+                        let args = self.load_args(cur)?;
+                        let a = Args {
+                            fname: &fname,
+                            args: &args,
+                            loader: self,
+                        };
+                        a.no_more(5)?;
+                        // yamy と同じく 5 個とも要る。文字列は引用符なしの語も受ける
+                        if args.len() < 4 {
+                            return self.err(format!(
+                                "`&ShellExecute`: {} 番目の引数（文字列）が無い",
+                                args.len() + 1
+                            ));
+                        }
+                        out.push(Action::ShellExecute(ShellExecute {
+                            operation: a.string(0)?,
+                            file: a.string(1)?,
+                            parameters: a.string(2)?,
+                            directory: a.string(3)?,
+                            show: a.show_command(4)?,
+                        }));
                         continue;
                     }
                     if fname.eq_ignore_ascii_case("Keymap") {
@@ -2292,6 +2347,38 @@ keymap Sub : Global"
             only(g, LCONTROL).actions,
             vec![Action::HelpVariable(String::new())]
         );
+    }
+
+    #[test]
+    fn shell_execute() {
+        let c = load_ok("key A = &ShellExecute(open, \"notepad.exe\", \"a b\", , showMaximized)");
+        assert_eq!(
+            only(global(&c), A).actions,
+            vec![Action::ShellExecute(ShellExecute {
+                operation: "open".into(),
+                file: "notepad.exe".into(),
+                parameters: "a b".into(),
+                directory: String::new(),
+                show: ShowCommand::ShowMaximized,
+            })]
+        );
+        assert!(
+            load_err("key A = &ShellExecute(open, \"a\", , )")
+                .message
+                .contains("窓の出し方")
+        );
+        assert!(
+            load_err("key A = &ShellExecute(open, \"a\")")
+                .message
+                .contains("3 番目")
+        );
+        assert!(
+            load_err("key A = &ShellExecute(open, \"a\", , , Big)")
+                .message
+                .contains("窓の出し方が不明")
+        );
+        load_err("key A = &ShellExecute(open, $Clipboard, , , ShowNormal)");
+        load_err("key A = &ShellExecute(open, \"a\", , , ShowNormal, 1)");
     }
 
     #[test]

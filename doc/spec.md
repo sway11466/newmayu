@@ -143,7 +143,7 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | `&LoadSetting([設定名])` | 設定を読み直す | × | feature-5 |
 | `&MayuDialog(Investigate\|Log, HIDE\|SHOW\|SHOWNA…)` | 調査 / ログのダイアログを出す・隠す | × | |
 | `&LogClear` | ログを消す | × | |
-| `&ShellExecute(operation, file, parameters, directory, show_command)` | プログラムやファイルを開く | × | |
+| `&ShellExecute(operation, file, parameters, directory, show_command)` | プログラムやファイルを開く | ○ | |
 | `&DirectSSTP(/名前/, protocol [, header…])` | Direct SSTP でゴーストに送る | × | |
 | `&PlugIn(DLL名 [, 関数名, 引数, runAsThread])` | Plugins フォルダの DLL の関数を呼ぶ | × | |
 

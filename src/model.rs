@@ -539,6 +539,35 @@ pub enum Action {
     HelpMessage(Option<HelpText>),
     /// `&HelpVariable(タイトル)`: `&Variable` の値を本文にして案内の窓を出す。押したときだけ。
     HelpVariable(String),
+    /// `&ShellExecute(操作, ファイル, パラメータ, フォルダ, 窓の出し方)`: プログラムやファイルを開く。押したときだけ。
+    ShellExecute(ShellExecute),
+}
+
+/// `&ShellExecute` の引数。空の文字列は yamy と同じく、操作なら `open`、それ以外なら NULL として渡す。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellExecute {
+    pub operation: String,
+    pub file: String,
+    pub parameters: String,
+    pub directory: String,
+    pub show: ShowCommand,
+}
+
+/// `&ShellExecute` の窓の出し方（yamy の `ShowCommandType`。Win32 の `SW_*`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShowCommand {
+    Hide,
+    Maximize,
+    Minimize,
+    Restore,
+    Show,
+    ShowDefault,
+    ShowMaximized,
+    ShowMinimized,
+    ShowMinNoActive,
+    ShowNA,
+    ShowNoActivate,
+    ShowNormal,
 }
 
 /// 案内の窓に出す 2 段の文字列。

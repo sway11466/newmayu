@@ -176,7 +176,10 @@ impl Pressed {
                         self.vks.insert((vk, extended));
                     }
                 }
-                Output::Func { .. } | Output::Sync | Output::Help { .. } => {}
+                Output::Func { .. }
+                | Output::Sync
+                | Output::Help { .. }
+                | Output::ShellExecute(_) => {}
             }
         }
     }
@@ -260,6 +263,10 @@ impl Os for Exec<'_> {
             Output::Sync => {
                 self.flush();
                 wait_sync(self.sync, self.rx, self.pending);
+            }
+            Output::ShellExecute(s) => {
+                self.flush();
+                window::shell_execute(s);
             }
         }
     }

@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::{
     Action, BasicMod, Config, Edge, EdgeSpec, EventKind, Func, HelpText, Key, KeymapId, LockMod,
-    LockState, ModSpec, ModState,
+    LockState, ModSpec, ModState, ShellExecute,
 };
 
 /// フックから届く 1 イベント。
@@ -71,6 +71,8 @@ pub enum Output {
         hwnd: u64,
         text: Option<HelpText>,
     },
+    /// `&ShellExecute`: プログラムやファイルを開く。
+    ShellExecute(ShellExecute),
 }
 
 /// エンジンが出力を渡す先（OS 窓口）。本体は `SendInput` などで実行し、テストは記録する。
@@ -657,6 +659,11 @@ impl Engine {
                         hwnd: self.focus_hwnd,
                         text: text.clone(),
                     });
+                }
+            }
+            Action::ShellExecute(s) => {
+                if edge == Edge::Down {
+                    os.output(Output::ShellExecute(s.clone()));
                 }
             }
             Action::HelpVariable(title) => {
@@ -1438,6 +1445,28 @@ mod tests {
         assert_eq!(feed(&mut e, Input::down(H)), vec![Output::Press(H)]);
         feed(&mut e, Input::up(H));
         assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+    }
+
+    #[test]
+    fn shell_execute_is_output_on_press() {
+        let (config, mut global) = base();
+        let s = crate::model::ShellExecute {
+            operation: "open".into(),
+            file: "notepad.exe".into(),
+            parameters: String::new(),
+            directory: String::new(),
+            show: crate::model::ShowCommand::ShowNormal,
+        };
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::ShellExecute(s.clone())],
+        );
+        let mut e = engine(config, vec![global]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::ShellExecute(s)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![]);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! 窓を操作する `&関数`（`&WindowMove` など）と `&MouseMove`・`&MouseWheel` の Win32 側。
+//! 窓を操作する `&関数`（`&WindowMove` など）と `&MouseMove`・`&MouseWheel`・`&ShellExecute` の Win32 側。
 //! yamy の function.cpp の funcWindow* と windowstool.cpp を写している。
 //!
 //! エンジンは OS を触らず、[`Output::Func`] に「フォーカス窓」と「何をするか」を乗せて渡す。
@@ -10,6 +10,9 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN,
     RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RedrawWindow, ScreenToClient,
 };
+use windows::Win32::System::Com::{
+    COINIT, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
@@ -18,18 +21,22 @@ use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, Glo
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
 };
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetCursorPos, GetParent, GetWindowLongPtrW,
     GetWindowRect, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic, IsWindow,
     IsZoomed, LWA_ALPHA, MB_OK, PostMessageW, RegisterWindowMessageW, SC_CLOSE, SC_MAXIMIZE,
-    SC_MINIMIZE, SC_RESTORE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
-    SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetLayeredWindowAttributes, SetWindowLongPtrW,
-    SetWindowPos, WM_SYSCOMMAND, WS_CHILD, WS_EX_LAYERED, WS_EX_MDICHILD, WS_EX_TOPMOST,
+    SC_MINIMIZE, SC_RESTORE, SHOW_WINDOW_CMD, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+    SW_SHOW, SW_SHOWDEFAULT, SW_SHOWMAXIMIZED, SW_SHOWMINIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNA,
+    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, SetWindowPos, WM_SYSCOMMAND, WS_CHILD, WS_EX_LAYERED, WS_EX_MDICHILD,
+    WS_EX_TOPMOST,
 };
 use windows::core::PCWSTR;
 
 use crate::engine::Output;
-use crate::model::{Func, Gravity, Target, ToWindow};
+use crate::model::{Func, Gravity, ShellExecute, ShowCommand, Target, ToWindow};
 
 /// `&WindowVMaximize` / `&WindowHMaximize` で覚えた元の位置（yamy の `WindowPosition`）。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -538,6 +545,84 @@ fn recenter(focus: HWND) {
     }
     // SAFETY: 有効な窓ハンドル。
     let _ = unsafe { PostMessageW(Some(focus), message, WPARAM(COMMAND_RECENTER), LPARAM(0)) };
+}
+
+/// `&ShellExecute`: yamy の Engine::shellExecute。yamy はキー処理から外して本体の窓で呼ぶので、
+/// ここでは別スレッドで呼ぶ。失敗したらログに出す。
+pub fn shell_execute(s: ShellExecute) {
+    std::thread::spawn(move || {
+        // ShellExecuteW はシェル拡張を COM で呼ぶことがあるので、このスレッドで COM を準備する
+        // SAFETY: 引数は値だけ。
+        let hr = unsafe {
+            CoInitializeEx(
+                None,
+                COINIT(COINIT_APARTMENTTHREADED.0 | COINIT_DISABLE_OLE1DDE.0),
+            )
+        };
+        let wide = |s: &str| -> Option<Vec<u16>> {
+            (!s.is_empty()).then(|| s.encode_utf16().chain(std::iter::once(0)).collect())
+        };
+        let ptr = |w: &Option<Vec<u16>>| w.as_ref().map_or(PCWSTR::null(), |w| PCWSTR(w.as_ptr()));
+        let operation = wide(&s.operation).or_else(|| wide("open"));
+        let (file, parameters, directory) =
+            (wide(&s.file), wide(&s.parameters), wide(&s.directory));
+        // SAFETY: 文字列はどれも NUL 終端の UTF-16 か NULL で、呼び終わるまで持つ。
+        let r = unsafe {
+            ShellExecuteW(
+                None,
+                ptr(&operation),
+                ptr(&file),
+                ptr(&parameters),
+                ptr(&directory),
+                show_command(s.show),
+            )
+        };
+        let code = r.0 as isize;
+        if code <= 32 {
+            crate::log!("&ShellExecute: {s:?}: {}", shell_execute_error(code));
+        }
+        if hr.is_ok() {
+            // SAFETY: CoInitializeEx が成功したスレッド。
+            unsafe { CoUninitialize() };
+        }
+    });
+}
+
+fn show_command(s: ShowCommand) -> SHOW_WINDOW_CMD {
+    match s {
+        ShowCommand::Hide => SW_HIDE,
+        ShowCommand::Maximize => SW_MAXIMIZE,
+        ShowCommand::Minimize => SW_MINIMIZE,
+        ShowCommand::Restore => SW_RESTORE,
+        ShowCommand::Show => SW_SHOW,
+        ShowCommand::ShowDefault => SW_SHOWDEFAULT,
+        ShowCommand::ShowMaximized => SW_SHOWMAXIMIZED,
+        ShowCommand::ShowMinimized => SW_SHOWMINIMIZED,
+        ShowCommand::ShowMinNoActive => SW_SHOWMINNOACTIVE,
+        ShowCommand::ShowNA => SW_SHOWNA,
+        ShowCommand::ShowNoActivate => SW_SHOWNOACTIVATE,
+        ShowCommand::ShowNormal => SW_SHOWNORMAL,
+    }
+}
+
+/// `ShellExecuteW` が 32 以下で返した失敗の理由（yamy の errorTable）。
+fn shell_execute_error(code: isize) -> &'static str {
+    match code {
+        0 => "メモリかリソースが足りない",
+        2 => "ファイルが見つからない",
+        3 => "パスが見つからない",
+        5 => "アクセスが拒否された",
+        8 => "メモリが足りない",
+        11 => "exe ファイルが不正",
+        26 => "共有違反",
+        27 => "ファイルの関連付けが不完全か不正",
+        28 => "DDE がタイムアウトした",
+        29 => "DDE が失敗した",
+        30 => "ほかの DDE を処理中で完了できない",
+        31 => "この拡張子に関連付けられたアプリが無い",
+        32 => "DLL が見つからない",
+        _ => "不明なエラー",
+    }
 }
 
 fn sys_command(hwnd: HWND, cmd: u32) {
