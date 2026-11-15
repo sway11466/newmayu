@@ -1,10 +1,15 @@
 //! 本体。フックを張り、`.mayu` の設定でキーを差し替え、タスクトレイに常駐する。
 //!
 //! ```text
-//! newmayu <file.mayu> [--log <path>] [--test-input <印>]
+//! newmayu [-Dシンボル…] [--log <path>] [--test-input <印>] [--test-mayu <file.mayu>]
 //! ```
 //!
+//! 読む `.mayu` は exe と同じフォルダの `yamy.ini` の設定の一覧で、選択中のもの（yamy と同じ。
+//! [`newmayu::setting`]）。`-Dシンボル` はそのシンボルを `define` 済みにする（yamy と同じ）。
+//!
 //! `--log` があればログをそのファイルに追記する。無ければ標準エラー。
+//!
+//! `--test-mayu` はテスト用。`yamy.ini` を見ずにその `.mayu` を読む。
 //!
 //! `--test-input <印>`（16 進。例 `0x6e6d`）はテスト入力モード。`dwExtraInfo` がその印の
 //! 注入入力（`SendInput` されたもの）を物理入力として扱う。印の無い注入入力は今までどおり
@@ -17,12 +22,14 @@
 //!
 //! トレイのメニュー:
 //! - 「設定の再読込」: `.mayu` を読み直し、通ればエンジンを作り直す。通らなければ今のまま
+//! - 「選択」: 設定の一覧から選び、その設定を読む
+//! - 「設定」: 設定ダイアログ。OK なら設定を読み直す
 //! - 「一時停止」: フックのコールバックで何もせず次へ流す。もう一度で再開
 //! - 「終了」: メッセージループを抜け、フックを外し、エンジンが押したままにしている
 //!   キーを離し、フック DLL とアイコンを外して終わる
 
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +52,8 @@ use newmayu::log;
 use newmayu::model::{Config, Key, LockMod};
 use newmayu::notify::{HookDll, Mailslot, SyncShare};
 use newmayu::platform;
+use newmayu::setting::{self, Ini, Lookup};
+use newmayu::setting_dialog;
 use newmayu::ui::{Command, Tray};
 use newmayu::window::{self, WindowOps};
 use newmayu_ipc::{
@@ -99,13 +108,16 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 /// コマンドライン引数。
 #[derive(Debug, PartialEq, Eq)]
 struct Args {
-    mayu: PathBuf,
+    /// `-Dシンボル` のシンボル（yamy と同じ）。
+    symbols: Vec<String>,
     log: Option<PathBuf>,
     /// テスト入力モードの印。
     test_mark: Option<usize>,
+    /// テスト用。`yamy.ini` を見ずに読む `.mayu`。
+    test_mayu: Option<PathBuf>,
 }
 
-const USAGE: &str = "使い方: newmayu <file.mayu> [--log <path>] [--test-input <印(16進)>]";
+const USAGE: &str = "使い方: newmayu [-Dシンボル…] [--log <path>] [--test-input <印(16進)>] [--test-mayu <file.mayu>]";
 
 /// `--test-input` の値。`0x` は付いていてもいなくてもよい。0 は普通の注入入力と
 /// 区別が付かない（`SendInput` の既定の `dwExtraInfo` が 0）ので受け付けない。
@@ -122,9 +134,10 @@ fn parse_test_mark(s: &str) -> Option<usize> {
 
 /// プログラム名を除いた引数を読む。形が違えば `Err(使い方)`。
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
-    let mut mayu = None;
+    let mut symbols = Vec::new();
     let mut log = None;
     let mut test_mark = None;
+    let mut test_mayu = None;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         if a == "--log" {
@@ -137,18 +150,73 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
                 (Some(m), None) => test_mark = Some(m),
                 _ => return Err(USAGE.to_string()),
             }
-        } else if mayu.is_none() && !a.starts_with("--") {
-            mayu = Some(PathBuf::from(a));
+        } else if a == "--test-mayu" {
+            match (it.next(), &test_mayu) {
+                (Some(p), None) => test_mayu = Some(PathBuf::from(p)),
+                _ => return Err(USAGE.to_string()),
+            }
+        } else if let Some(sym) = a.strip_prefix("-D") {
+            symbols.push(sym.to_string());
         } else {
             return Err(USAGE.to_string());
         }
     }
-    let mayu = mayu.ok_or_else(|| USAGE.to_string())?;
     Ok(Args {
-        mayu,
+        symbols,
         log,
         test_mark,
+        test_mayu,
     })
+}
+
+/// 設定を読む（yamy の `load`）。読むたびに `yamy.ini` を見直す。
+/// 読んだ `.mayu` のパスも返す。
+///
+/// 選択中の設定も exe のフォルダの `.mayu` も無ければ、yamy と同じく設定ダイアログを出し、
+/// OK ならもう一度探す。
+fn load_config(symbols: &[String], test_mayu: Option<&Path>) -> Result<(Config, PathBuf), String> {
+    if let Some(p) = test_mayu {
+        return parser::load(p, symbols)
+            .map(|c| (c, p.to_path_buf()))
+            .map_err(|e| e.to_string());
+    }
+    let ini = Ini::beside_exe()?;
+    let dir = setting::exe_dir()?;
+    loop {
+        match setting::lookup(ini.selected().as_deref(), &dir, |p| {
+            std::fs::File::open(p).is_ok()
+        }) {
+            Lookup::Load { path, symbols: own } => {
+                let all: Vec<String> = symbols.iter().cloned().chain(own).collect();
+                return parser::load(&path, &all)
+                    .map(|c| (c, path))
+                    .map_err(|e| e.to_string());
+            }
+            Lookup::Unreadable(p) => {
+                return Err(format!("{}: 読めない（選択中の設定）", p.display()));
+            }
+            Lookup::NoSetting => {
+                if !setting_dialog::run(&ini) {
+                    return Err(format!(
+                        "設定が無い（{} に選択中の設定が無く、{} も無い）",
+                        ini.path().display(),
+                        dir.join(".mayu").display()
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// 設定を読み直し、通ればエンジンを作り直す。通らなければ今のまま。
+fn reload(tx: &Sender<Event>, symbols: &[String], test_mayu: Option<&Path>) {
+    match load_config(symbols, test_mayu) {
+        Ok((c, path)) => {
+            log!("再読込: {}", path.display());
+            let _ = tx.send(Event::Reload(Box::new(c)));
+        }
+        Err(e) => log!("再読込に失敗。今の設定のまま: {e}"),
+    }
 }
 
 /// エンジンが OS 側で押したままにしているキー。終了時にまとめて離す。
@@ -415,13 +483,13 @@ fn main() -> ExitCode {
     if let Err(e) = log::init(args.log.as_deref()) {
         return fatal(&e);
     }
-    let path = args.mayu.display().to_string();
-    let config = match parser::load(&args.mayu) {
+    let (config, path) = match load_config(&args.symbols, args.test_mayu.as_deref()) {
         Ok(c) => c,
-        Err(e) => return fatal(&e.to_string()),
+        Err(e) => return fatal(&e),
     };
     log!(
-        "{path}: キーマップ {} 個、割付 {} 件",
+        "{}: キーマップ {} 個、割付 {} 件",
+        path.display(),
         config.keymaps.len(),
         config
             .keymaps
@@ -480,16 +548,28 @@ fn main() -> ExitCode {
 
     // トレイ。メニューの操作はこのスレッド（メッセージループ）で届く。
     let menu_tx = tx.clone();
-    let mayu = args.mayu.clone();
+    let symbols = args.symbols.clone();
+    let test_mayu = args.test_mayu.clone();
     let tray = match Tray::new(
         "newmayu",
         Box::new(move |cmd| match cmd {
-            Command::Reload => match parser::load(&mayu) {
-                Ok(c) => {
-                    log!("再読込: {}", mayu.display());
-                    let _ = menu_tx.send(Event::Reload(Box::new(c)));
+            Command::Reload => reload(&menu_tx, &symbols, test_mayu.as_deref()),
+            Command::Select(i) => {
+                match Ini::beside_exe() {
+                    Ok(ini) => {
+                        ini.set_index(i);
+                    }
+                    Err(e) => log!("{e}"),
                 }
-                Err(e) => log!("再読込に失敗。今の設定のまま: {e}"),
+                reload(&menu_tx, &symbols, test_mayu.as_deref());
+            }
+            Command::Setting => match Ini::beside_exe() {
+                Ok(ini) => {
+                    if setting_dialog::run(&ini) {
+                        reload(&menu_tx, &symbols, test_mayu.as_deref());
+                    }
+                }
+                Err(e) => log!("{e}"),
             },
             Command::Pause(p) => {
                 PAUSED.store(p, Ordering::Relaxed);
@@ -543,72 +623,79 @@ mod tests {
         parse_args(v.iter().map(|s| s.to_string()))
     }
 
+    fn args() -> Args {
+        Args {
+            symbols: vec![],
+            log: None,
+            test_mark: None,
+            test_mayu: None,
+        }
+    }
+
     #[test]
-    fn mayu_だけ() {
+    fn 引数なし() {
+        assert_eq!(a(&[]), Ok(args()));
+    }
+
+    #[test]
+    fn d_はシンボル() {
         assert_eq!(
-            a(&["k.mayu"]),
+            a(&["-DUSE109", "--log", "n.log", "-D"]),
             Ok(Args {
-                mayu: PathBuf::from("k.mayu"),
-                log: None,
-                test_mark: None,
+                symbols: vec!["USE109".to_string(), String::new()],
+                log: Some(PathBuf::from("n.log")),
+                ..args()
             })
         );
     }
 
     #[test]
-    fn log_は前でも後でもよい() {
-        let want = Ok(Args {
-            mayu: PathBuf::from("k.mayu"),
-            log: Some(PathBuf::from("n.log")),
-            test_mark: None,
-        });
-        assert_eq!(a(&["k.mayu", "--log", "n.log"]), want);
-        assert_eq!(a(&["--log", "n.log", "k.mayu"]), want);
-    }
-
-    #[test]
     fn test_input_は16進の印() {
         let want = Ok(Args {
-            mayu: PathBuf::from("k.mayu"),
-            log: None,
             test_mark: Some(0x6e6d),
+            ..args()
         });
-        assert_eq!(a(&["k.mayu", "--test-input", "0x6e6d"]), want);
-        assert_eq!(a(&["--test-input", "6E6D", "k.mayu"]), want);
+        assert_eq!(a(&["--test-input", "0x6e6d"]), want);
+        assert_eq!(a(&["--test-input", "6E6D"]), want);
         assert_eq!(
-            a(&["k.mayu", "--log", "n.log", "--test-input", "0x1"]),
+            a(&[
+                "--log",
+                "n.log",
+                "--test-input",
+                "0x1",
+                "--test-mayu",
+                "k.mayu"
+            ]),
             Ok(Args {
-                mayu: PathBuf::from("k.mayu"),
                 log: Some(PathBuf::from("n.log")),
                 test_mark: Some(1),
+                test_mayu: Some(PathBuf::from("k.mayu")),
+                ..args()
             })
         );
     }
 
     #[test]
     fn test_input_の形が違えば使い方() {
-        assert_eq!(a(&["k.mayu", "--test-input"]), Err(USAGE.to_string()));
-        assert_eq!(a(&["k.mayu", "--test-input", "0"]), Err(USAGE.to_string()));
-        assert_eq!(a(&["k.mayu", "--test-input", "0x"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["--test-input"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["--test-input", "0"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["--test-input", "0x"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["--test-input", "xyz"]), Err(USAGE.to_string()));
         assert_eq!(
-            a(&["k.mayu", "--test-input", "xyz"]),
-            Err(USAGE.to_string())
-        );
-        assert_eq!(
-            a(&["k.mayu", "--test-input", "1", "--test-input", "2"]),
+            a(&["--test-input", "1", "--test-input", "2"]),
             Err(USAGE.to_string())
         );
     }
 
     #[test]
     fn 形が違えば使い方() {
-        assert_eq!(a(&[]), Err(USAGE.to_string()));
         assert_eq!(a(&["--log"]), Err(USAGE.to_string()));
-        assert_eq!(a(&["k.mayu", "--log"]), Err(USAGE.to_string()));
-        assert_eq!(a(&["a.mayu", "b.mayu"]), Err(USAGE.to_string()));
-        assert_eq!(a(&["--foo", "a.mayu"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["k.mayu"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["--foo"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["--test-mayu"]), Err(USAGE.to_string()));
+        assert_eq!(a(&["--log", "a", "--log", "b"]), Err(USAGE.to_string()));
         assert_eq!(
-            a(&["k.mayu", "--log", "a", "--log", "b"]),
+            a(&["--test-mayu", "a", "--test-mayu", "b"]),
             Err(USAGE.to_string())
         );
     }

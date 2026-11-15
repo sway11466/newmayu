@@ -325,11 +325,12 @@ fn start_newmayu(dir: &Path, mayu: &Path) -> Result<Newmayu, String> {
     }
     let log = dir.join("newmayu.log");
     let child = Command::new(&exe)
-        .arg(mayu)
         .arg("--log")
         .arg(&log)
         .arg("--test-input")
         .arg(format!("{MARK:#x}"))
+        .arg("--test-mayu")
+        .arg(mayu)
         .spawn()
         .map_err(|e| format!("{} を起動できない: {e}", exe.display()))?;
     let mut child = Newmayu(child);

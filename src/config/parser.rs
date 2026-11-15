@@ -77,8 +77,10 @@ impl std::error::Error for LoadError {}
 type Result<T> = std::result::Result<T, LoadError>;
 
 /// ファイルから読み込む。`include` は読んでいるファイルの場所からの相対パス。
-pub fn load(path: &Path) -> Result<Config> {
+/// `symbols` は `define` 済みとして扱うシンボル（yamy の設定の `-D` と起動引数の `-D`）。
+pub fn load(path: &Path, symbols: &[String]) -> Result<Config> {
     let mut loader = Loader::new();
+    loader.symbols.extend(symbols.iter().map(|s| lower(s)));
     loader.load_file(path, 0)?;
     loader.finish()
 }
@@ -2583,16 +2585,32 @@ keymap Sub : Global"
         )
         .unwrap();
         std::fs::write(sub.join("inner.mayu"), "key A = B\n").unwrap();
-        let c = load(&dir.join("top.mayu")).unwrap();
+        let c = load(&dir.join("top.mayu"), &[]).unwrap();
         let g = global(&c);
         assert_eq!(g.assignments.len(), 2);
         assert_eq!(only(g, A).actions.len(), 1);
 
         // include 先のエラーは include 先のファイル名と行で出る
         std::fs::write(sub.join("inner.mayu"), "key A = B\n\nkey Z = B\n").unwrap();
-        let e = load(&dir.join("top.mayu")).unwrap_err();
+        let e = load(&dir.join("top.mayu"), &[]).unwrap_err();
         assert!(e.file.ends_with("inner.mayu"), "{e}");
         assert_eq!(e.line, 3);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn symbols_given_to_load_are_defined() {
+        let dir = std::env::temp_dir().join(format!("newmayu-symbols-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("s.mayu"),
+            format!("{KEYS}\nif ( use109 )\nkey A = B\nendif\n"),
+        )
+        .unwrap();
+        let c = load(&dir.join("s.mayu"), &["USE109".to_string()]).unwrap();
+        assert_eq!(global(&c).assignments.len(), 1);
+        let c = load(&dir.join("s.mayu"), &[]).unwrap();
+        assert_eq!(global(&c).assignments.len(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2605,7 +2623,7 @@ keymap Sub : Global"
         let muhenkan = Key::plain(0x7b);
         let check = |name: &str, bytes: &[u8]| {
             std::fs::write(dir.join(name), bytes).unwrap();
-            let c = load(&dir.join(name)).unwrap();
+            let c = load(&dir.join(name), &[]).unwrap();
             let a = only(global(&c), muhenkan);
             assert!(
                 matches!(a.actions.as_slice(), [Action::Key { key, .. }] if *key == B),
@@ -2632,7 +2650,7 @@ keymap Sub : Global"
 
         // どちらでもない: エラー（UTF-8 として読めなくなった行番号付き）
         std::fs::write(dir.join("bad.mayu"), b"# ok\n# \xfe\xff\n").unwrap();
-        let e = load(&dir.join("bad.mayu")).unwrap_err();
+        let e = load(&dir.join("bad.mayu"), &[]).unwrap_err();
         assert_eq!(e.line, 2);
         assert!(e.message.contains("文字コード"), "{e}");
         std::fs::remove_dir_all(&dir).unwrap();

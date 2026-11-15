@@ -7,6 +7,8 @@
 //! - `notify` : フック DLL（`newmayu-hook`）の読み込みと、そこから届く通知の受信
 //! - `window` : 窓を操作する `&関数`（`&WindowMove` など）の Win32 側
 //! - `log`    : ログ（時刻付き。標準エラーか `--log` のファイル）
+//! - `setting`: 設定の一覧（`yamy.ini`）
+//! - `setting_dialog`: 設定ダイアログ（一覧の追加・編集・削除・並べ替え）
 //! - `ui`     : タスクトレイのアイコンとメニュー
 //! - `help`   : 案内の窓（`&HelpMessage` / `&HelpVariable`。yamy と異なる）
 
@@ -17,5 +19,7 @@ pub mod log;
 pub mod model;
 pub mod notify;
 pub mod platform;
+pub mod setting;
+pub mod setting_dialog;
 pub mod ui;
 pub mod window;

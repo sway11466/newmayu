@@ -4,8 +4,12 @@
 //! クリックするとポップアップメニューを出し、選ばれた項目を [`Command`] として
 //! 作成時に渡された関数に渡す。
 //!
+//! メニューの「選択」は `yamy.ini` の設定の一覧で、開くたびに読み直す（yamy と同じ）。
+//!
 //! 窓はメッセージループを回しているスレッドで作ること（`Tray::new` を呼んだ
 //! スレッドにメッセージが届く）。
+
+use std::cell::Cell;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -15,18 +19,24 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, IDI_APPLICATION, LoadIconW,
-    MF_CHECKED, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW, RegisterWindowMessageW,
-    SetForegroundWindow, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
-    TrackPopupMenu, WINDOW_EX_STYLE, WM_APP, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
-    WS_OVERLAPPED,
+    MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW,
+    RegisterWindowMessageW, SetForegroundWindow, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_NONOTIFY,
+    TPM_RETURNCMD, TrackPopupMenu, WINDOW_EX_STYLE, WM_APP, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+    WNDCLASSW, WS_OVERLAPPED,
 };
-use windows::core::{BOOL, w};
+use windows::core::{BOOL, HSTRING, w};
+
+use crate::setting::{self, Ini};
 
 /// メニューで選ばれたもの。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     /// 設定の再読込。
     Reload,
+    /// 「選択」で設定の一覧から選んだ。番号は `.mayuN` の N。
+    Select(usize),
+    /// 設定ダイアログを出す。
+    Setting,
     /// 一時停止の切り替え。`true` なら停止、`false` なら再開。
     Pause(bool),
     Exit,
@@ -38,15 +48,20 @@ const ICON_ID: u32 = 1;
 const ID_RELOAD: usize = 1;
 const ID_PAUSE: usize = 2;
 const ID_EXIT: usize = 3;
+const ID_SETTING: usize = 4;
+/// 「選択」の項目。`.mayuN` は `ID_SELECT_BEGIN + N`（yamy の `ID_MENUITEM_reloadBegin`）。
+const ID_SELECT_BEGIN: usize = 1000;
 
-type Handler = Box<dyn FnMut(Command)>;
+/// メニューの処理。設定ダイアログを開いている間もメニューは動く（yamy と同じ）ので、
+/// 処理の途中でもう一度呼ばれることがある。
+type Handler = Box<dyn Fn(Command)>;
 
 /// 窓に結び付ける状態。`GWLP_USERDATA` に Box の生ポインタで置く。
 struct State {
     handler: Handler,
     tip: String,
     /// 一時停止中か。メニューの「一時停止」にチェックを付ける。
-    paused: bool,
+    paused: Cell<bool>,
     /// Explorer が立ち上がり直したときに届く `TaskbarCreated`。
     taskbar_created: u32,
 }
@@ -77,7 +92,7 @@ impl Tray {
         let mut state = Box::new(State {
             handler,
             tip: tip.to_string(),
-            paused: false,
+            paused: Cell::new(false),
             taskbar_created,
         });
         // SAFETY: 登録済みのクラス名。見せない窓なので位置・大きさは任せる。
@@ -163,12 +178,23 @@ fn popup(hwnd: HWND, paused: bool) -> Option<Command> {
     } else {
         MF_STRING
     };
-    let built = unsafe {
-        AppendMenuW(menu, MF_STRING, ID_RELOAD, w!("設定の再読込")).is_ok()
-            && AppendMenuW(menu, pause_flags, ID_PAUSE, w!("一時停止")).is_ok()
-            && AppendMenuW(menu, MF_SEPARATOR, 0, None).is_ok()
-            && AppendMenuW(menu, MF_STRING, ID_EXIT, w!("終了")).is_ok()
-    };
+    let select = select_menu();
+    let built = select.is_some()
+        && unsafe {
+            AppendMenuW(menu, MF_STRING, ID_RELOAD, w!("設定の再読込")).is_ok()
+                && AppendMenuW(
+                    menu,
+                    MF_POPUP,
+                    select.map_or(0, |m| m.0 as usize),
+                    w!("選択(&C)"),
+                )
+                .is_ok()
+                && AppendMenuW(menu, MF_STRING, ID_SETTING, w!("設定(&S)...")).is_ok()
+                && AppendMenuW(menu, MF_SEPARATOR, 0, None).is_ok()
+                && AppendMenuW(menu, pause_flags, ID_PAUSE, w!("一時停止")).is_ok()
+                && AppendMenuW(menu, MF_SEPARATOR, 0, None).is_ok()
+                && AppendMenuW(menu, MF_STRING, ID_EXIT, w!("終了")).is_ok()
+        };
     let mut chosen = BOOL(0);
     if built {
         // SAFETY: hwnd は自分の窓。メニューを閉じるためにいったん前面に出す（MS の指示）。
@@ -186,14 +212,44 @@ fn popup(hwnd: HWND, paused: bool) -> Option<Command> {
             let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         }
     }
-    // SAFETY: 今作ったメニュー。
-    let _ = unsafe { DestroyMenu(menu) };
+    // SAFETY: 今作ったメニュー。付けたサブメニューも一緒に壊れる。
+    // 付ける前に失敗したサブメニューは別に壊す。
+    unsafe {
+        let _ = DestroyMenu(menu);
+        if let (false, Some(m)) = (built, select) {
+            let _ = DestroyMenu(m);
+        }
+    }
     match chosen.0 as usize {
         ID_RELOAD => Some(Command::Reload),
+        ID_SETTING => Some(Command::Setting),
         ID_PAUSE => Some(Command::Pause(!paused)),
         ID_EXIT => Some(Command::Exit),
+        id if id >= ID_SELECT_BEGIN => Some(Command::Select(id - ID_SELECT_BEGIN)),
         _ => None,
     }
+}
+
+/// 「選択」のサブメニュー。`yamy.ini` の設定の名前を並べ、選択中にチェックを付ける。
+fn select_menu() -> Option<windows::Win32::UI::WindowsAndMessaging::HMENU> {
+    // SAFETY: 引数なし。
+    let menu = unsafe { CreatePopupMenu() }.ok()?;
+    if let Ok(ini) = Ini::beside_exe() {
+        let selected = ini.index();
+        for (i, raw) in ini.entries().iter().enumerate() {
+            let Some(name) = setting::menu_name(raw) else {
+                continue;
+            };
+            let flags = if i == selected {
+                MF_STRING | MF_CHECKED
+            } else {
+                MF_STRING
+            };
+            // SAFETY: menu は今作ったメニュー。
+            let _ = unsafe { AppendMenuW(menu, flags, ID_SELECT_BEGIN + i, &HSTRING::from(name)) };
+        }
+    }
+    Some(menu)
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -204,15 +260,16 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     // SAFETY: USERDATA には Tray::new が置いた State の生ポインタか 0 が入っている。
     // State は Tray が持ち、Drop で窓を壊す前に 0 に戻すので、0 でなければ有効。
-    let state = unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut State).as_mut() };
+    // 処理の途中でもう一度呼ばれることがあるので共有参照で触る。
+    let state = unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const State).as_ref() };
     if let Some(state) = state {
         if msg == WM_TRAY {
             let event = (lparam.0 & 0xffff) as u32;
             if (event == WM_RBUTTONUP || event == WM_LBUTTONUP)
-                && let Some(cmd) = popup(hwnd, state.paused)
+                && let Some(cmd) = popup(hwnd, state.paused.get())
             {
                 if let Command::Pause(p) = cmd {
-                    state.paused = p;
+                    state.paused.set(p);
                 }
                 (state.handler)(cmd);
             }

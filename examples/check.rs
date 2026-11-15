@@ -15,7 +15,7 @@ fn main() -> ExitCode {
         eprintln!("使い方: check <file.mayu>");
         return ExitCode::FAILURE;
     };
-    let config = match parser::load(Path::new(&path)) {
+    let config = match parser::load(Path::new(&path), &[]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
