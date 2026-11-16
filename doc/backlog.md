@@ -18,14 +18,6 @@
 
 実装済みコードに足す機能。採番は本書冒頭「index」。各エントリは 背景／ゴール／対応／該当 で記す。
 
-### feature-5
-
-**&WindowIdentify / &InvestigateCommand / &LoadSetting（調査・読込の UI）**
-- ゴール：3 関数を含む `.mayu` が読み込め、押すと yamy と同じ結果が得られる。
-- 背景：yamy では `&WindowIdentify` はフォーカス窓のクラス名・タイトルを画面に出す（`window` 行を書くための調査用）。`&InvestigateCommand` はフォーカス窓に届く WM_COMMAND をログに出すモードの切替。`&LoadSetting(名前)` は設定を読み直す（名前なしなら今の設定）。default.mayu の C-S-D / C-S-F1 / C-S-S に割り付けてある。
-- 対応：(1) パーサーに 3 関数を足す。(2) `&LoadSetting` はトレイの再読込と同じ処理につなぐ。(3) `&WindowIdentify` はフォーカス通知で得ている `exe名:クラス:…` の列を表示に回す。(4) `&InvestigateCommand` はフック DLL で WM_COMMAND を見て通知する。未決：表示先（ログだけにするか、窓を出すか）、`&MayuDialog(Log, SHOW)` のようなダイアログをどうするか。
-- 該当：`src/config/parser.rs`・`src/model.rs`・`src/main.rs`・`hook/src/lib.rs`。
-
 ### feature-7
 
 **TSF のアプリで変換中を取る**
@@ -63,6 +55,7 @@
 - 起動できないときのメッセージボックス：`yamy.ini` の選択中の設定に存在しない `.mayu` のパスを書いて起こすと、ログと同じ理由がメッセージボックスにも出る。
 - 設定の一覧：yamy の `yamy.ini` を newmayu.exe と同じフォルダに置くと、選択中の設定が読まれる。トレイの「選択」に一覧が並び、選ぶとその設定に切り替わる。「設定」でダイアログが出て、追加・編集・削除・並べ替え・参照ができ、OK で `yamy.ini` に書かれて読み直される。`yamy.ini` も `.mayu` も無いと、起動時に設定ダイアログが出る。
 - 案内の窓（&HelpMessage / &HelpVariable）：出たとき、ピンを押したときに、フォーカス窓からフォーカスを奪わない。
+- &WindowIdentify / &InvestigateCommand / &LoadSetting：default.mayu の C-S-D でフォーカス窓の CLASS・TITLE・位置と大きさがログに出る（コンソールでも出る）。C-S-F1 の後にメニューやボタンを使うと `&PostMessage(…)` の行が出て、もう一度 C-S-F1 で止まる。C-S-S で設定が読み直される。`&LoadSetting("名前")` でその名前の設定に切り替わり、一覧に無い名前ならログに `unknown setting name` が出る。
 - ログダイアログ：トレイの「ログ」で出て、起動時の見出しと設定の読み込みのログが並ぶ。「詳細」を付けるとキー変換・フォーカスの行も出る。「ログのクリア」で消えて見出しが出直す。「フォントの変更」でログの文字がすぐ変わり、`yamy.ini` の `logFont` に書かれる。「閉じる」で隠れる。default.mayu などの `&MayuDialog(Log, …)` / `&LogClear` も同じく効く。再読込に失敗するとログダイアログが出る。
 
 ## parking lot

@@ -114,7 +114,7 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | `&WindowToggleTopMost` | 最前面フラグを切り替える | ○ | |
 | `&WindowSetAlpha(alpha)` | 半透明化の切り替え（0 透明〜100 不透明）。-1 で全部戻す | ○ | |
 | `&WindowRedraw` | 再描画 | ○ | |
-| `&WindowIdentify` | クラス名・タイトル・位置と大きさをログに出す | × | feature-5 |
+| `&WindowIdentify` | クラス名・タイトル・位置と大きさをログに出す | ○ | |
 | `&SetForegroundWindow(/クラス/ [, &&\|\|\|, /タイトル/])` | yamy 固有。一致する窓を前面にする | × | |
 | `&PostMessage(宛先, message, wParam, lParam)` | 窓にメッセージを送る。宛先は ToItself / ToMainWindow / ToOverlappedWindow / ToParentWindow / 正の数（N 代上の親） | △ | 数での指定は未対応 |
 
@@ -139,8 +139,8 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | `&HelpMessage([title, message])` | トレイ付近にメッセージを出す。引数なしで消す | ○ | 出し方は yamy と異なる（6 章） |
 | `&HelpVariable(title)` | 内部変数の値を title と一緒に出す | ○ | 出し方は 6 章 |
 | `&DescribeBindings` | いまのキーマップの割付を表示する | × | |
-| `&InvestigateCommand` | 窓に届く WM_COMMAND / WM_SYSCOMMAND をログに出すモードの切り替え | × | feature-5 |
-| `&LoadSetting([設定名])` | 設定を読み直す | × | feature-5 |
+| `&InvestigateCommand` | 窓に届く WM_COMMAND / WM_SYSCOMMAND をログに出すモードの切り替え | ○ | yamy は宛先が ToItself などの名前で表せないとき、フォーカス窓から何段目の親かを出す処理の直後で必ず抜け、何も出さない。バグと想定し、番号を出す（期待する動作）に変えた |
+| `&LoadSetting([設定名])` | 設定を読み直す | ○ | |
 | `&MayuDialog(Investigate\|Log, HIDE\|SHOW\|SHOWNA…)` | 調査 / ログのダイアログを出す・隠す | △ | `Log` のみ。`Investigate` は調査ダイアログが無いので読み込みエラー |
 | `&LogClear` | ログを消す | ○ | |
 | `&ShellExecute(operation, file, parameters, directory, show_command)` | プログラムやファイルを開く | ○ | |

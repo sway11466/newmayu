@@ -11,12 +11,14 @@
 //! - `setting_dialog`: 設定ダイアログ（一覧の追加・編集・削除・並べ替え）
 //! - `log_dialog`: ログダイアログ（ログの表示・クリア・フォント・詳細）
 //! - `ui`     : タスクトレイのアイコンとメニュー
+//! - `investigate`: 調査用の `&関数`（`&WindowIdentify`・`&InvestigateCommand`）の Win32 側
 //! - `help`   : 案内の窓（`&HelpMessage` / `&HelpVariable`。yamy と異なる）
 
 pub mod config;
 mod dialog;
 pub mod engine;
 pub mod help;
+pub mod investigate;
 pub mod log;
 pub mod log_dialog;
 pub mod model;

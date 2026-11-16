@@ -17,21 +17,37 @@ pub enum Kind {
     Focus,
     /// 本体が `&Sync` で出した同期キー（`def sync`）の離しが、そのスレッドのメッセージループに届いた。本文なし。
     Sync,
+    /// `&WindowIdentify` の命令を受けた窓の名前（yamy の `Notify::Type_name`）。本文は Focus と同じ。
+    Name,
+    /// `&InvestigateCommand` の間、窓に届いた `WM_COMMAND` / `WM_SYSCOMMAND`（yamy の `Notify::Type_command`）。
+    /// `flags` はメッセージ。本文は `[u64 wParam][u64 lParam]`（LE）。
+    Command,
 }
 
 /// 本体から DLL へ命令を送る登録メッセージ（`RegisterWindowMessageW`）の名前。`wParam` が命令の番号。
 pub const COMMAND_MESSAGE_NAME: &str = "newmayu-command";
 /// 命令: `&Recenter`。
 pub const COMMAND_RECENTER: usize = 1;
+/// 命令: `&WindowIdentify`。受けた窓の名前を `Kind::Name` で返す。
+pub const COMMAND_NOTIFY_NAME: usize = 2;
 
-/// 同期キーを DLL に知らせる共有メモリの名前。本体が作り、DLL が読む。
+/// 同期キーと `&InvestigateCommand` の状態を DLL に知らせる共有メモリの名前。本体が作り、DLL が読む。
 pub const SYNC_SHARE_NAME: &str = r"Local\newmayu-sync";
-/// 共有メモリの中身: `[u32 スキャンコード][u32 拡張(E0/E1)なら 1]`（LE）。スキャンコード 0 = 同期キー無し。
-pub const SYNC_SHARE_SIZE: usize = 8;
+/// 共有メモリの中身: `[u32 スキャンコード][u32 拡張(E0/E1)なら 1][u32 WM_COMMAND を知らせるなら 1]`（LE）。
+/// スキャンコード 0 = 同期キー無し。
+pub const SYNC_SHARE_SIZE: usize = 12;
 
 pub fn write_sync_share(buf: &mut [u8; SYNC_SHARE_SIZE], scan: u32, extended: bool) {
     buf[0..4].copy_from_slice(&scan.to_le_bytes());
     buf[4..8].copy_from_slice(&u32::from(extended).to_le_bytes());
+}
+
+/// 共有メモリの中の、`WM_COMMAND` を知らせるか（`&InvestigateCommand`）の位置。
+pub const NOTIFY_COMMAND_OFFSET: usize = 8;
+
+/// `WM_COMMAND` を知らせるか。
+pub fn read_notify_command(b: &[u8; SYNC_SHARE_SIZE]) -> bool {
+    u32::from_le_bytes(b[8..12].try_into().unwrap()) != 0
 }
 
 /// `(スキャンコード, 拡張)`。
@@ -47,6 +63,8 @@ impl Kind {
             Kind::Lock => 1,
             Kind::Focus => 2,
             Kind::Sync => 3,
+            Kind::Name => 4,
+            Kind::Command => 5,
         }
     }
     const fn from_code(c: u32) -> Option<Kind> {
@@ -54,6 +72,8 @@ impl Kind {
             1 => Some(Kind::Lock),
             2 => Some(Kind::Focus),
             3 => Some(Kind::Sync),
+            4 => Some(Kind::Name),
+            5 => Some(Kind::Command),
             _ => None,
         }
     }
@@ -142,6 +162,15 @@ pub fn write_focus(buf: &mut [u8; MAX_SIZE], h: &Header, class: &[u8], title: &[
     i + title.len()
 }
 
+/// Command 通知を書く。メッセージは `h.flags`。戻り値は書いた長さ。
+pub fn write_command(buf: &mut [u8; MAX_SIZE], h: &Header, wparam: u64, lparam: u64) -> usize {
+    h.write(buf);
+    let i = Header::SIZE;
+    buf[i..i + 8].copy_from_slice(&wparam.to_le_bytes());
+    buf[i + 8..i + 16].copy_from_slice(&lparam.to_le_bytes());
+    i + 16
+}
+
 /// 本体側で読んだ 1 通知。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notify {
@@ -150,12 +179,15 @@ pub struct Notify {
     pub class: String,
     /// Focus のとき: タイトルの列（同じ順）。
     pub title: String,
+    /// Command のとき: `(wParam, lParam)`。
+    pub params: (u64, u64),
 }
 
 impl Notify {
     /// 形が違う・種類が知らない値なら `None`。
     pub fn from_bytes(b: &[u8]) -> Option<Notify> {
         let header = Header::read(b)?;
+        let mut params = (0, 0);
         let (class, title) = match header.kind {
             Kind::Lock | Kind::Sync => {
                 if b.len() != Header::SIZE {
@@ -163,7 +195,16 @@ impl Notify {
                 }
                 (String::new(), String::new())
             }
-            Kind::Focus => {
+            Kind::Command => {
+                let i = Header::SIZE;
+                if b.len() != i + 16 {
+                    return None;
+                }
+                let u64_at = |j: usize| u64::from_le_bytes(b[j..j + 8].try_into().unwrap());
+                params = (u64_at(i), u64_at(i + 8));
+                (String::new(), String::new())
+            }
+            Kind::Focus | Kind::Name => {
                 let i = Header::SIZE;
                 if b.len() < i + 4 {
                     return None;
@@ -182,6 +223,7 @@ impl Notify {
             header,
             class,
             title,
+            params,
         })
     }
 }
@@ -232,6 +274,39 @@ mod tests {
         assert_eq!(read_sync_share(&s), (0x7e, true));
         write_sync_share(&mut s, 0, false);
         assert_eq!(read_sync_share(&s), (0, false));
+        assert!(!read_notify_command(&s));
+        s[NOTIFY_COMMAND_OFFSET] = 1;
+        assert!(read_notify_command(&s));
+        // 同期キーを書いても WM_COMMAND を知らせるかは変わらない
+        write_sync_share(&mut s, 0x7e, false);
+        assert!(read_notify_command(&s));
+    }
+
+    #[test]
+    fn command_and_name_roundtrip() {
+        let h = Header {
+            kind: Kind::Command,
+            cause: 0,
+            thread_id: 7,
+            hwnd: 0x10,
+            flags: 0x111,
+        };
+        let mut buf = [0u8; MAX_SIZE];
+        let n = write_command(&mut buf, &h, 0x0001_0002, u64::MAX);
+        let got = Notify::from_bytes(&buf[..n]).unwrap();
+        assert_eq!(got.header, h);
+        assert_eq!(got.params, (0x0001_0002, u64::MAX));
+        assert_eq!(Notify::from_bytes(&buf[..n - 1]), None);
+
+        let h = Header {
+            kind: Kind::Name,
+            ..h
+        };
+        let n = write_focus(&mut buf, &h, b"a.exe:Edit", b"a.exe:x");
+        let got = Notify::from_bytes(&buf[..n]).unwrap();
+        assert_eq!(got.header.kind, Kind::Name);
+        assert_eq!(got.class, "a.exe:Edit");
+        assert_eq!(got.title, "a.exe:x");
     }
 
     #[test]

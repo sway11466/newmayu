@@ -33,7 +33,7 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -49,13 +49,14 @@ use windows::core::HSTRING;
 use newmayu::config::parser;
 use newmayu::engine::{Engine, Input, Os, Output};
 use newmayu::help::Help;
+use newmayu::investigate;
 use newmayu::log_dialog;
 use newmayu::model::{Config, Key, LockMod};
 use newmayu::notify::{HookDll, Mailslot, SyncShare};
 use newmayu::platform;
 use newmayu::setting::{self, Ini, Lookup};
 use newmayu::setting_dialog;
-use newmayu::ui::{Command, Tray};
+use newmayu::ui::{self, Command, Tray};
 use newmayu::window::{self, WindowOps};
 use newmayu::{log, log_detail};
 use newmayu_ipc::{
@@ -81,6 +82,9 @@ enum Event {
 /// フックのコールバックからエンジンスレッドへ渡すキュー。
 /// コールバックは C の関数でユーザーポインタを受け取れないため static に置く。
 static TX: OnceLock<Sender<Event>> = OnceLock::new();
+
+/// newmayu の窓（トレイ・ダイアログ）のスレッド。`&InvestigateCommand` で自分の分を出さないため。
+static UI_THREAD: AtomicU32 = AtomicU32::new(0);
 
 /// 一時停止中。コールバックは何もせず次のフックへ流す。
 static PAUSED: AtomicBool = AtomicBool::new(false);
@@ -225,6 +229,25 @@ fn reload(tx: &Sender<Event>, symbols: &[String], test_mayu: Option<&Path>) {
     }
 }
 
+/// `&LoadSetting([名前])`（yamy の `funcLoadSetting`）。名前があれば設定の一覧でその名前の設定を選び、
+/// 再読込をトレイのスレッドでさせる。名前が一覧に無ければ何もしない。
+fn load_setting(name: &str) {
+    if !name.is_empty() {
+        let selected = match Ini::beside_exe() {
+            Ok(ini) => ini.select_by_name(name),
+            Err(e) => {
+                log!("{e}");
+                false
+            }
+        };
+        if !selected {
+            log!("unknown setting name: {name}");
+            return;
+        }
+    }
+    ui::post_reload();
+}
+
 /// エンジンが OS 側で押したままにしているキー。終了時にまとめて離す。
 #[derive(Default)]
 struct Pressed {
@@ -255,7 +278,9 @@ impl Pressed {
                 | Output::Help { .. }
                 | Output::ShellExecute(_)
                 | Output::MayuDialog(_)
-                | Output::LogClear => {}
+                | Output::LogClear
+                | Output::InvestigateCommand
+                | Output::LoadSetting(_) => {}
             }
         }
     }
@@ -312,6 +337,7 @@ struct Exec<'a> {
     all: Vec<Output>,
     window_ops: &'a mut WindowOps,
     help: &'a Help,
+    share: &'a SyncShare,
     pressed: &'a mut Pressed,
     rx: &'a Receiver<Event>,
     pending: &'a mut VecDeque<Event>,
@@ -351,6 +377,19 @@ impl Os for Exec<'_> {
             Output::LogClear => {
                 self.flush();
                 log_dialog::post_clear();
+            }
+            Output::InvestigateCommand => {
+                self.flush();
+                // yamy と同じく、切り替えた後の状態を出す
+                if self.share.toggle_notify_command() {
+                    log!(" begin");
+                } else {
+                    log!(" end");
+                }
+            }
+            Output::LoadSetting(name) => {
+                self.flush();
+                load_setting(&name);
             }
         }
     }
@@ -402,6 +441,7 @@ fn engine_thread(config: Config, rx: Receiver<Event>, sync_share: SyncShare, hel
                     all: Vec::new(),
                     window_ops: &mut window_ops,
                     help: &help,
+                    share: &sync_share,
                     pressed: &mut pressed,
                     rx: &rx,
                     pending: &mut pending,
@@ -442,6 +482,15 @@ fn engine_thread(config: Config, rx: Receiver<Event>, sync_share: SyncShare, hel
                         h.thread_id,
                         h.hwnd,
                         h.cause
+                    ),
+                    Kind::Name => investigate::log_name(h.hwnd, h.thread_id, &n.class, &n.title),
+                    Kind::Command => investigate::log_command(
+                        engine.focus_hwnd(),
+                        UI_THREAD.load(Ordering::Relaxed),
+                        h.hwnd,
+                        h.flags,
+                        n.params.0,
+                        n.params.1,
                     ),
                     Kind::Focus => {
                         engine.set_focus(h.hwnd, &n.class, &n.title);
@@ -499,6 +548,11 @@ fn main() -> ExitCode {
     if let Err(e) = log::init(args.log.as_deref()) {
         return fatal(&e);
     }
+    // SAFETY: 引数なし。
+    UI_THREAD.store(
+        unsafe { windows::Win32::System::Threading::GetCurrentThreadId() },
+        Ordering::Relaxed,
+    );
     // ログダイアログ。隠したまま作り、ここからのログを溜める（yamy と同じく、見出しの後に設定を読む）
     log::start_view();
     log_dialog::banner(false);

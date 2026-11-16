@@ -546,6 +546,11 @@ pub enum Action {
     MayuDialog(ShowCommand),
     /// `&LogClear`: ログを消す（ログダイアログの「ログのクリア」と同じ）。押したときだけ。
     LogClear,
+    /// `&InvestigateCommand`: 窓に届く `WM_COMMAND` / `WM_SYSCOMMAND` をログに出すかを切り替える。押したときだけ。
+    InvestigateCommand,
+    /// `&LoadSetting([名前])`: 設定を読み直す。名前があれば、設定の一覧でその名前の設定を選んでから。
+    /// 空なら名前なし。押したときだけ。
+    LoadSetting(String),
 }
 
 /// `&ShellExecute` の引数。空の文字列は yamy と同じく、操作なら `open`、それ以外なら NULL として渡す。
@@ -721,6 +726,8 @@ pub enum Func {
     WindowRedraw,
     /// `&Recenter`: Edit / RichEdit でキャレット行を縦の中央に。
     Recenter,
+    /// `&WindowIdentify`: フォーカス窓のクラス名・タイトル・位置と大きさをログに出す。
+    WindowIdentify,
     /// `&WindowResizeTo(幅, 高さ [, 対象])`: 0 はそのまま、負なら作業領域からの差。
     WindowResizeTo {
         width: i32,

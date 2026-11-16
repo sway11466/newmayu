@@ -9,7 +9,8 @@
 use std::path::PathBuf;
 
 use newmayu_ipc::{
-    MAILSLOT_NAME, MAX_SIZE, Notify, SYNC_SHARE_NAME, SYNC_SHARE_SIZE, write_sync_share,
+    MAILSLOT_NAME, MAX_SIZE, NOTIFY_COMMAND_OFFSET, Notify, SYNC_SHARE_NAME, SYNC_SHARE_SIZE,
+    write_sync_share,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::ReadFile;
@@ -151,14 +152,31 @@ impl SyncShare {
     }
 
     /// 同期キーを書く（設定の再読込で変わったとき用）。`None` なら「無し」。
+    /// `WM_COMMAND` を知らせるか（`&InvestigateCommand`）はそのまま。
     pub fn set(&self, key: Option<Key>) {
         let mut buf = [0u8; SYNC_SHARE_SIZE];
         // `def sync` のスキャンコードは 1 個（パーサーが 1 個だけ読む）
         if let Some(sc) = key.map(|k| k.codes()[0]) {
             write_sync_share(&mut buf, u32::from(sc.code), sc.prefix != ScanPrefix::None);
         }
-        // SAFETY: view は SYNC_SHARE_SIZE バイトの書ける領域。
-        unsafe { (self.view.Value as *mut [u8; SYNC_SHARE_SIZE]).write_volatile(buf) };
+        let p = self.view.Value as *mut u32;
+        // SAFETY: view は SYNC_SHARE_SIZE バイトの書ける領域で、ページ境界にそろっている。u32 単位で書く。
+        unsafe {
+            p.write_volatile(u32::from_le_bytes(buf[0..4].try_into().unwrap()));
+            p.add(1)
+                .write_volatile(u32::from_le_bytes(buf[4..8].try_into().unwrap()));
+        }
+    }
+
+    /// `&InvestigateCommand`: 窓に届く `WM_COMMAND` を DLL に知らせさせるかを切り替える。切り替えた後の値を返す。
+    pub fn toggle_notify_command(&self) -> bool {
+        let p = (self.view.Value as *mut u8).wrapping_add(NOTIFY_COMMAND_OFFSET) as *mut u32;
+        // SAFETY: view は SYNC_SHARE_SIZE バイトの書ける領域。p はその中の u32 にそろった位置。
+        unsafe {
+            let on = p.read_volatile() == 0;
+            p.write_volatile(u32::from(on).to_le());
+            on
+        }
     }
 }
 

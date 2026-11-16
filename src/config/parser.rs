@@ -27,6 +27,7 @@
 //!                                              #        | &HelpMessage(["タイトル" [, "本文"]]) | &HelpVariable("タイトル")
 //!                                              #        | &ShellExecute(操作, ファイル, パラメータ, フォルダ, 窓の出し方)
 //!                                              #        | &MayuDialog(Log, 窓の出し方) | &LogClear
+//!                                              #        | &WindowIdentify | &InvestigateCommand | &LoadSetting(["名前"])
 //!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）
 //!                                              # NL- CL- SL- KL-（NumLock CapsLock ScrollLock カナ）も書ける
 //! mod MODNAME (=|+=|-=) [!!]KEY...                # !! はワンショット（単独で押して離したらそのキー）
@@ -1189,6 +1190,21 @@ impl Loader {
                         out.push(Action::LogClear);
                         continue;
                     }
+                    if fname.eq_ignore_ascii_case("InvestigateCommand") {
+                        out.push(Action::InvestigateCommand);
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("LoadSetting") {
+                        let args = self.load_args(cur)?;
+                        let a = Args {
+                            fname: &fname,
+                            args: &args,
+                            loader: self,
+                        };
+                        a.no_more(1)?;
+                        out.push(Action::LoadSetting(a.string(0)?));
+                        continue;
+                    }
                     if fname.eq_ignore_ascii_case("MayuDialog") {
                         let args = self.load_args(cur)?;
                         let a = Args {
@@ -1355,6 +1371,7 @@ impl Loader {
             "windowtoggletopmost"
             | "windowredraw"
             | "recenter"
+            | "windowidentify"
             | "undefined"
             | "clipboardupcaseword"
             | "clipboarddowncaseword" => 0,
@@ -1416,6 +1433,7 @@ impl Loader {
             "windowsetalpha" => Func::WindowSetAlpha(a.int(0)?),
             "windowredraw" => Func::WindowRedraw,
             "recenter" => Func::Recenter,
+            "windowidentify" => Func::WindowIdentify,
             "clipboardupcaseword" => Func::ClipboardUpcaseWord,
             "clipboarddowncaseword" => Func::ClipboardDowncaseWord,
             "windowresizeto" => Func::WindowResizeTo {
@@ -2412,6 +2430,41 @@ keymap Sub : Global"
         );
         load_err("key A = &ShellExecute(open, $Clipboard, , , ShowNormal)");
         load_err("key A = &ShellExecute(open, \"a\", , , ShowNormal, 1)");
+    }
+
+    #[test]
+    fn investigate_and_load_setting() {
+        let c = load_ok(
+            "key A = &WindowIdentify &MayuDialog(Log, SHOW)\n\
+             key B = &InvestigateCommand\n\
+             key H = &LoadSetting &LoadSetting(\"109 Emacs\")",
+        );
+        let g = global(&c);
+        assert_eq!(
+            only(g, A).actions,
+            vec![
+                Action::Func(Func::WindowIdentify),
+                Action::MayuDialog(ShowCommand::Show)
+            ]
+        );
+        assert_eq!(only(g, B).actions, vec![Action::InvestigateCommand]);
+        assert_eq!(
+            only(g, H).actions,
+            vec![
+                Action::LoadSetting(String::new()),
+                Action::LoadSetting("109 Emacs".into())
+            ]
+        );
+        assert!(
+            load_err("key A = &LoadSetting(a, b)")
+                .message
+                .contains("引数が多い")
+        );
+        assert!(
+            load_err("key A = &WindowIdentify()")
+                .message
+                .contains("引数が多い")
+        );
     }
 
     #[test]

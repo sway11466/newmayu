@@ -77,6 +77,10 @@ pub enum Output {
     MayuDialog(ShowCommand),
     /// `&LogClear`: ログを消す。
     LogClear,
+    /// `&InvestigateCommand`: `WM_COMMAND` をログに出すかを切り替える。
+    InvestigateCommand,
+    /// `&LoadSetting([名前])`: 設定を読み直す。空なら名前なし。
+    LoadSetting(String),
 }
 
 /// エンジンが出力を渡す先（OS 窓口）。本体は `SendInput` などで実行し、テストは記録する。
@@ -223,6 +227,11 @@ impl Engine {
     /// 通常の解決の起点（窓に一致するキーマップ列の先頭）。
     fn root(&self) -> KeymapId {
         self.focus.first().copied().unwrap_or(self.current)
+    }
+
+    /// いまのフォーカス窓。
+    pub fn focus_hwnd(&self) -> u64 {
+        self.focus_hwnd
     }
 
     /// いま窓に一致しているキーマップ列。
@@ -678,6 +687,16 @@ impl Engine {
             Action::LogClear => {
                 if edge == Edge::Down {
                     os.output(Output::LogClear);
+                }
+            }
+            Action::InvestigateCommand => {
+                if edge == Edge::Down {
+                    os.output(Output::InvestigateCommand);
+                }
+            }
+            Action::LoadSetting(name) => {
+                if edge == Edge::Down {
+                    os.output(Output::LoadSetting(name.clone()));
                 }
             }
             Action::HelpVariable(title) => {
@@ -1480,6 +1499,24 @@ mod tests {
         );
         let mut e = engine(config, vec![global]);
         assert_eq!(feed(&mut e, Input::down(A)), vec![Output::ShellExecute(s)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![]);
+    }
+
+    #[test]
+    fn investigate_and_load_setting_are_output_on_press() {
+        let (config, mut global) = base();
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::InvestigateCommand, Action::LoadSetting("a".into())],
+        );
+        let mut e = engine(config, vec![global]);
+        assert_eq!(
+            feed(&mut e, Input::down(A)),
+            vec![Output::InvestigateCommand, Output::LoadSetting("a".into())]
+        );
         assert_eq!(feed(&mut e, Input::up(A)), vec![]);
     }
 

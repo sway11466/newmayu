@@ -162,6 +162,7 @@ impl WindowOps {
                 }
             }
             Func::Recenter => recenter(focus),
+            Func::WindowIdentify => crate::investigate::window_identify(focus),
             Func::WindowResizeTo {
                 width: w,
                 height: h,
@@ -448,7 +449,7 @@ fn target_window(focus: HWND, t: Target) -> Option<TargetWindow> {
 
 /// 子窓でなくなるまで親をたどる（yamy の `getToplevelWindow`）。
 /// `want_mdi` なら MDI 子窓で止まり、戻り値の 2 つ目が true になる。
-fn toplevel(mut hwnd: HWND, want_mdi: bool) -> (Option<HWND>, bool) {
+pub(crate) fn toplevel(mut hwnd: HWND, want_mdi: bool) -> (Option<HWND>, bool) {
     while !hwnd.0.is_null() {
         // SAFETY: 有効な窓ハンドル（無効なら 0 が返る）。
         let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
@@ -534,6 +535,11 @@ fn set_pos_z(hwnd: HWND, after: HWND) {
 
 /// `&Recenter`: フォーカス窓へ命令を送る。スクロールはそのプロセスの中のフック DLL がする。
 fn recenter(focus: HWND) {
+    post_command(focus, COMMAND_RECENTER);
+}
+
+/// 窓へフック DLL への命令（`COMMAND_*`）を送る。そのプロセスの中のフック DLL が受ける。
+pub(crate) fn post_command(hwnd: HWND, command: usize) {
     let name: Vec<u16> = COMMAND_MESSAGE_NAME
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -543,8 +549,8 @@ fn recenter(focus: HWND) {
     if message == 0 {
         return;
     }
-    // SAFETY: 有効な窓ハンドル。
-    let _ = unsafe { PostMessageW(Some(focus), message, WPARAM(COMMAND_RECENTER), LPARAM(0)) };
+    // SAFETY: 窓ハンドルを渡すだけ。無効なら失敗する。
+    let _ = unsafe { PostMessageW(Some(hwnd), message, WPARAM(command), LPARAM(0)) };
 }
 
 /// `&ShellExecute`: yamy の Engine::shellExecute。yamy はキー処理から外して本体の窓で呼ぶので、

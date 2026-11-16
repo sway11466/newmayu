@@ -10,6 +10,7 @@
 //! スレッドにメッセージが届く）。
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -46,6 +47,20 @@ pub enum Command {
 
 /// トレイアイコンの通知が届くメッセージ。
 const WM_TRAY: u32 = WM_APP + 1;
+/// `&LoadSetting`: 設定の再読込をこのスレッドでする（yamy の `EngineNotify_loadSetting`）。
+const WM_RELOAD: u32 = WM_APP + 2;
+
+/// トレイの窓（無ければ 0）。[`post_reload`] が使う。
+static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// 設定の再読込を、トレイの「設定の再読込」と同じくトレイのスレッドでさせる。どのスレッドからでも呼べる。
+pub fn post_reload() {
+    let h = TRAY_HWND.load(Ordering::SeqCst);
+    if h != 0 {
+        // SAFETY: トレイの窓へ知らせるだけ。
+        let _ = unsafe { PostMessageW(Some(HWND(h as *mut _)), WM_RELOAD, WPARAM(0), LPARAM(0)) };
+    }
+}
 const ICON_ID: u32 = 1;
 const ID_RELOAD: usize = 1;
 const ID_PAUSE: usize = 2;
@@ -123,6 +138,7 @@ impl Tray {
             let _ = unsafe { DestroyWindow(hwnd) };
             return Err("トレイにアイコンを置けない".to_string());
         }
+        TRAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
         Ok(Tray {
             hwnd,
             _state: state,
@@ -140,6 +156,7 @@ impl Drop for Tray {
         };
         // SAFETY: data は有効な NOTIFYICONDATAW。
         let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
+        TRAY_HWND.store(0, Ordering::SeqCst);
         // SAFETY: new で作った窓。USERDATA を外してから壊す。
         unsafe {
             SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
@@ -279,6 +296,10 @@ unsafe extern "system" fn wnd_proc(
                 }
                 (state.handler)(cmd);
             }
+            return LRESULT(0);
+        }
+        if msg == WM_RELOAD {
+            (state.handler)(Command::Reload);
             return LRESULT(0);
         }
         if msg == state.taskbar_created {

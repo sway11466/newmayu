@@ -6,7 +6,8 @@
 //! 本体のメールスロットに通知を書く。同期キーのスキャンコードは本体が共有メモリ
 //! （`SYNC_SHARE_NAME`）に置き、最初のキー離しで読む。フォーカスの通知には、フォーカス窓から親をたどったクラス名の列
 //! （`exe名:クラス:…:クラス`）とタイトルの列を載せる（yamy の `getClassNameTitleName`）。
-//! 本体からの命令（`&Recenter`）は登録メッセージで届き、`WH_GETMESSAGE` で受ける。
+//! 本体からの命令（`&Recenter`・`&WindowIdentify`）は登録メッセージで届き、`WH_GETMESSAGE` で受ける。
+//! `&InvestigateCommand` の間（共有メモリで知る）は、窓に届いた `WM_COMMAND` / `WM_SYSCOMMAND` を知らせる。
 //!
 //! 他プロセスの中で動くので、やることを最小にする:
 //! - 状態は atomic の static だけ。ヒープも std のスレッドローカルも使わない
@@ -16,9 +17,10 @@
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use newmayu_ipc::{
-    CAPS_LOCK, COMMAND_MESSAGE_NAME, COMMAND_RECENTER, Header, IME_COMPOSING, IME_OPEN, KANA_LOCK,
-    Kind, MAILSLOT_NAME, MAX_NAME, MAX_SIZE, NUM_LOCK, SCROLL_LOCK, SYNC_SHARE_NAME,
-    SYNC_SHARE_SIZE, read_sync_share, write_focus, write_lock,
+    CAPS_LOCK, COMMAND_MESSAGE_NAME, COMMAND_NOTIFY_NAME, COMMAND_RECENTER, Header, IME_COMPOSING,
+    IME_OPEN, KANA_LOCK, Kind, MAILSLOT_NAME, MAX_NAME, MAX_SIZE, NUM_LOCK, SCROLL_LOCK,
+    SYNC_SHARE_NAME, SYNC_SHARE_SIZE, read_notify_command, read_sync_share, write_command,
+    write_focus, write_lock,
 };
 use windows::Win32::Foundation::{
     GENERIC_WRITE, HANDLE, HINSTANCE, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, POINTL, RECT,
@@ -42,9 +44,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CWPSTRUCT, CallNextHookEx, ES_MULTILINE, GWL_STYLE, GetClassNameW, GetClientRect, GetParent,
     GetWindowLongW, GetWindowTextW, HHOOK, MSG, PM_REMOVE, RegisterWindowMessageW, SendMessageW,
     SetWindowsHookExW, UnhookWindowsHookEx, WA_INACTIVE, WH_CALLWNDPROC, WH_GETMESSAGE,
-    WM_ACTIVATE, WM_ACTIVATEAPP, WM_ENTERMENULOOP, WM_EXITMENULOOP, WM_IME_ENDCOMPOSITION,
-    WM_IME_NOTIFY, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_MOUSEACTIVATE, WM_NCACTIVATE,
-    WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_ACTIVATE, WM_ACTIVATEAPP, WM_COMMAND, WM_ENTERMENULOOP, WM_EXITMENULOOP,
+    WM_IME_ENDCOMPOSITION, WM_IME_NOTIFY, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
+    WM_MOUSEACTIVATE, WM_NCACTIVATE, WM_SETFOCUS, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 use windows::core::PCWSTR;
 
@@ -125,8 +127,12 @@ unsafe extern "system" fn get_message_proc(code: i32, wparam: WPARAM, lparam: LP
         // SAFETY: WH_GETMESSAGE では lparam は MSG を指す。
         let msg = unsafe { &*(lparam.0 as *const MSG) };
         on_message(msg.hwnd, msg.message, msg.wParam, msg.lParam, 0);
-        if msg.message == command_message() && msg.wParam.0 == COMMAND_RECENTER {
-            recenter(msg.hwnd);
+        if msg.message == command_message() {
+            match msg.wParam.0 {
+                COMMAND_RECENTER => recenter(msg.hwnd),
+                COMMAND_NOTIFY_NAME => notify_name(msg.hwnd, Kind::Name, 13),
+                _ => {}
+            }
         }
     }
     // SAFETY: 引数はそのまま次のフックへ渡す。
@@ -191,6 +197,9 @@ fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, cause_ba
         WM_EXITMENULOOP => {
             IN_MENU.store(false, Ordering::Relaxed);
             notify_focus(true, cause_base + 11);
+        }
+        WM_COMMAND | WM_SYSCOMMAND => {
+            notify_command(hwnd, message, wparam, lparam, cause_base + 14)
         }
         _ => {}
     }
@@ -296,11 +305,16 @@ fn notify_focus(force: bool, cause: u32) {
     if !force && prev == hwnd.0 as isize {
         return;
     }
+    notify_name(hwnd, Kind::Focus, cause);
+}
+
+/// 窓の名前の列を送る（yamy の `notifyName`）。
+fn notify_name(hwnd: HWND, kind: Kind, cause: u32) {
     let mut class = [0u8; MAX_NAME];
     let mut title = [0u8; MAX_NAME];
     let (cl, tl) = build_names(hwnd, &mut class, &mut title);
     let h = Header {
-        kind: Kind::Focus,
+        kind,
         cause,
         // SAFETY: 引数なしの単純な API。
         thread_id: unsafe { GetCurrentThreadId() },
@@ -460,8 +474,32 @@ fn check_sync(hwnd: HWND, lparam: LPARAM, cause: u32) {
     send(&buf[..n]);
 }
 
+/// `&InvestigateCommand` の間なら、窓に届いた `WM_COMMAND` / `WM_SYSCOMMAND` を送る（yamy の `notifyCommand`）。
+fn notify_command(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, cause: u32) {
+    if !share().is_some_and(read_notify_command) {
+        return;
+    }
+    let h = Header {
+        kind: Kind::Command,
+        cause,
+        // SAFETY: 引数なし。
+        thread_id: unsafe { GetCurrentThreadId() },
+        hwnd: hwnd.0 as usize as u64,
+        flags: message,
+    };
+    let mut buf = [0u8; MAX_SIZE];
+    let n = write_command(&mut buf, &h, wparam.0 as u64, lparam.0 as u64);
+    send(&buf[..n]);
+}
+
 /// 共有メモリにある同期キー。無ければ `None`。
 fn sync_key() -> Option<(u32, bool)> {
+    let (scan, extended) = read_sync_share(share()?);
+    (scan != 0).then_some((scan, extended))
+}
+
+/// 本体の共有メモリ。開けなければ `None`。
+fn share() -> Option<&'static [u8; SYNC_SHARE_SIZE]> {
     let mut v = SYNC_VIEW.load(Ordering::Relaxed);
     if v == 0 {
         v = open_sync_share();
@@ -470,11 +508,9 @@ fn sync_key() -> Option<(u32, bool)> {
     if v <= 0 {
         return None;
     }
-    // SAFETY: v は MapViewOfFile が返した SYNC_SHARE_SIZE バイト以上の読める領域。本体が書き換えるのは
-    // u32 単位で、読む側は古い値か新しい値のどちらかを見る。
-    let b = unsafe { &*(v as *const [u8; SYNC_SHARE_SIZE]) };
-    let (scan, extended) = read_sync_share(b);
-    (scan != 0).then_some((scan, extended))
+    // SAFETY: v は MapViewOfFile が返した SYNC_SHARE_SIZE バイト以上の読める領域で、プロセスが終わるまで写したまま。
+    // 本体が書き換えるのは u32 単位で、読む側は古い値か新しい値のどちらかを見る。
+    Some(unsafe { &*(v as *const [u8; SYNC_SHARE_SIZE]) })
 }
 
 /// 本体の共有メモリを開いて写す。開けなければ -1。写しはプロセスが終わるまで持つ。

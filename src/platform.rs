@@ -141,7 +141,9 @@ pub fn send(outputs: &[Output]) {
             | Output::Help { .. }
             | Output::ShellExecute(_)
             | Output::MayuDialog(_)
-            | Output::LogClear => Vec::new(),
+            | Output::LogClear
+            | Output::InvestigateCommand
+            | Output::LoadSetting(_) => Vec::new(),
         })
         .collect();
     if inputs.is_empty() {
