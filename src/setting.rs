@@ -3,6 +3,7 @@
 //! exe と同じフォルダの `yamy.ini` の `[yamy]` 節に、yamy と同じ形で持つ。
 //! - `.mayu0`〜`.mayu255` = `名前;パス;シンボル`。シンボルは `-D名前` を `;` で区切る
 //! - `.mayuIndex` = 選択中の番号
+//! - `logFont` = ログダイアログのフォント
 //!
 //! `.mayu0` から順に読み、無い番号で止まる（yamy と同じ）。
 
@@ -189,6 +190,15 @@ impl Ini {
             Some(i) => self.set_index(i),
             None => false,
         }
+    }
+
+    /// ログダイアログのフォント（yamy の `logFont`。`LOGFONT` を `,` で並べた形）。
+    pub fn log_font(&self) -> Option<String> {
+        self.read("logFont")
+    }
+
+    pub fn set_log_font(&self, value: &str) -> bool {
+        self.write("logFont", value)
     }
 
     /// 値。空の値は無いのと同じ（yamy と同じ）。

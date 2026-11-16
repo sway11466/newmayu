@@ -6,16 +6,19 @@
 //! - `config` : `.mayu` の読み込み（字句解析・構文解析→ `model::Config`）
 //! - `notify` : フック DLL（`newmayu-hook`）の読み込みと、そこから届く通知の受信
 //! - `window` : 窓を操作する `&関数`（`&WindowMove` など）の Win32 側
-//! - `log`    : ログ（時刻付き。標準エラーか `--log` のファイル）
+//! - `log`    : ログ（時刻付き。標準エラーか `--log` のファイル、とログダイアログ）
 //! - `setting`: 設定の一覧（`yamy.ini`）
 //! - `setting_dialog`: 設定ダイアログ（一覧の追加・編集・削除・並べ替え）
+//! - `log_dialog`: ログダイアログ（ログの表示・クリア・フォント・詳細）
 //! - `ui`     : タスクトレイのアイコンとメニュー
 //! - `help`   : 案内の窓（`&HelpMessage` / `&HelpVariable`。yamy と異なる）
 
 pub mod config;
+mod dialog;
 pub mod engine;
 pub mod help;
 pub mod log;
+pub mod log_dialog;
 pub mod model;
 pub mod notify;
 pub mod platform;

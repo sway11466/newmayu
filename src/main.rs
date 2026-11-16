@@ -25,6 +25,7 @@
 //! - 「選択」: 設定の一覧から選び、その設定を読む
 //! - 「設定」: 設定ダイアログ。OK なら設定を読み直す
 //! - 「一時停止」: フックのコールバックで何もせず次へ流す。もう一度で再開
+//! - 「ログ」: ログダイアログを出す
 //! - 「終了」: メッセージループを抜け、フックを外し、エンジンが押したままにしている
 //!   キーを離し、フック DLL とアイコンを外して終わる
 
@@ -39,16 +40,16 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, MB_ICONERROR, MB_OK,
-    MSG, MessageBoxW, PostQuitMessage, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL,
+    CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, IsDialogMessageW, KBDLLHOOKSTRUCT,
+    MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostQuitMessage, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL,
 };
 use windows::core::HSTRING;
 
 use newmayu::config::parser;
 use newmayu::engine::{Engine, Input, Os, Output};
 use newmayu::help::Help;
-use newmayu::log;
+use newmayu::log_dialog;
 use newmayu::model::{Config, Key, LockMod};
 use newmayu::notify::{HookDll, Mailslot, SyncShare};
 use newmayu::platform;
@@ -56,6 +57,7 @@ use newmayu::setting::{self, Ini, Lookup};
 use newmayu::setting_dialog;
 use newmayu::ui::{Command, Tray};
 use newmayu::window::{self, WindowOps};
+use newmayu::{log, log_detail};
 use newmayu_ipc::{
     CAPS_LOCK, IME_COMPOSING, IME_OPEN, KANA_LOCK, Kind, NUM_LOCK, Notify, SCROLL_LOCK,
 };
@@ -215,7 +217,11 @@ fn reload(tx: &Sender<Event>, symbols: &[String], test_mayu: Option<&Path>) {
             log!("再読込: {}", path.display());
             let _ = tx.send(Event::Reload(Box::new(c)));
         }
-        Err(e) => log!("再読込に失敗。今の設定のまま: {e}"),
+        Err(e) => {
+            log!("再読込に失敗。今の設定のまま: {e}");
+            // yamy と同じく、読み込みに失敗したらログを出す
+            log_dialog::show();
+        }
     }
 }
 
@@ -247,7 +253,9 @@ impl Pressed {
                 Output::Func { .. }
                 | Output::Sync
                 | Output::Help { .. }
-                | Output::ShellExecute(_) => {}
+                | Output::ShellExecute(_)
+                | Output::MayuDialog(_)
+                | Output::LogClear => {}
             }
         }
     }
@@ -280,7 +288,7 @@ fn wait_sync(sync: Option<Key>, rx: &Receiver<Event>, pending: &mut VecDeque<Eve
         }
         match rx.recv_timeout(deadline - now) {
             Ok(Event::Notify(n)) if n.header.kind == Kind::Sync => {
-                log!(
+                log_detail!(
                     "&Sync: 届いた (thread={} hwnd={:#x})",
                     n.header.thread_id,
                     n.header.hwnd
@@ -335,6 +343,14 @@ impl Os for Exec<'_> {
             Output::ShellExecute(s) => {
                 self.flush();
                 window::shell_execute(s);
+            }
+            Output::MayuDialog(show) => {
+                self.flush();
+                log_dialog::post_show(show);
+            }
+            Output::LogClear => {
+                self.flush();
+                log_dialog::post_clear();
             }
         }
     }
@@ -392,13 +408,13 @@ fn engine_thread(config: Config, rx: Receiver<Event>, sync_share: SyncShare, hel
                 };
                 engine.feed(input, &mut exec);
                 exec.flush();
-                log!("{input:?} -> {:?}", exec.all);
+                log_detail!("{input:?} -> {:?}", exec.all);
             }
             Event::Notify(n) => {
                 let h = n.header;
                 match h.kind {
                     Kind::Lock => {
-                        log!(
+                        log_detail!(
                             "IME: on={} 変換中={} NL={} CL={} SL={} KL={} (thread={} hwnd={:#x} cause={})",
                             h.ime_open(),
                             h.ime_composing(),
@@ -421,7 +437,7 @@ fn engine_thread(config: Config, rx: Receiver<Event>, sync_share: SyncShare, hel
                             engine.set_lock(m, h.lock(flag));
                         }
                     }
-                    Kind::Sync => log!(
+                    Kind::Sync => log_detail!(
                         "同期キーが届いた（待っていない） (thread={} hwnd={:#x} cause={})",
                         h.thread_id,
                         h.hwnd,
@@ -434,7 +450,7 @@ fn engine_thread(config: Config, rx: Receiver<Event>, sync_share: SyncShare, hel
                             .iter()
                             .map(|k| engine.config().keymap(*k).name.as_str())
                             .collect();
-                        log!(
+                        log_detail!(
                             "FOCUS: {} | {} (thread={} hwnd={:#x} cause={}) -> {:?}",
                             n.class,
                             n.title,
@@ -481,6 +497,12 @@ fn main() -> ExitCode {
         Err(e) => return fatal(&e),
     };
     if let Err(e) = log::init(args.log.as_deref()) {
+        return fatal(&e);
+    }
+    // ログダイアログ。隠したまま作り、ここからのログを溜める（yamy と同じく、見出しの後に設定を読む）
+    log::start_view();
+    log_dialog::banner(false);
+    if let Err(e) = Ini::beside_exe().and_then(log_dialog::create) {
         return fatal(&e);
     }
     let (config, path) = match load_config(&args.symbols, args.test_mayu.as_deref()) {
@@ -571,6 +593,7 @@ fn main() -> ExitCode {
                 }
                 Err(e) => log!("{e}"),
             },
+            Command::Log => log_dialog::show(),
             Command::Pause(p) => {
                 PAUSED.store(p, Ordering::Relaxed);
                 log!("{}", if p { "一時停止" } else { "再開" });
@@ -594,6 +617,13 @@ fn main() -> ExitCode {
     let mut msg = MSG::default();
     // SAFETY: msg は有効な MSG。
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+        // ログダイアログのキー操作（Tab など）はダイアログに任せる（yamy と同じ）
+        if let Some(h) = log_dialog::hwnd()
+            // SAFETY: h はこのスレッドで作ったダイアログ。msg は GetMessageW が埋めた MSG。
+            && unsafe { IsDialogMessageW(h, &msg) }.as_bool()
+        {
+            continue;
+        }
         // SAFETY: GetMessageW が埋めた MSG。
         unsafe {
             let _ = TranslateMessage(&msg);
@@ -610,6 +640,7 @@ fn main() -> ExitCode {
         log!("エンジンスレッドが {QUIT_WAIT:?} 以内に終わらなかった");
     }
     drop(hook_dll);
+    log_dialog::destroy();
     drop(tray);
     ExitCode::SUCCESS
 }

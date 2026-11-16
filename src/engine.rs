@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::{
     Action, BasicMod, Config, Edge, EdgeSpec, EventKind, Func, HelpText, Key, KeymapId, LockMod,
-    LockState, ModSpec, ModState, ShellExecute,
+    LockState, ModSpec, ModState, ShellExecute, ShowCommand,
 };
 
 /// フックから届く 1 イベント。
@@ -73,6 +73,10 @@ pub enum Output {
     },
     /// `&ShellExecute`: プログラムやファイルを開く。
     ShellExecute(ShellExecute),
+    /// `&MayuDialog(Log, 出し方)`: ログダイアログを出す・隠す。
+    MayuDialog(ShowCommand),
+    /// `&LogClear`: ログを消す。
+    LogClear,
 }
 
 /// エンジンが出力を渡す先（OS 窓口）。本体は `SendInput` などで実行し、テストは記録する。
@@ -664,6 +668,16 @@ impl Engine {
             Action::ShellExecute(s) => {
                 if edge == Edge::Down {
                     os.output(Output::ShellExecute(s.clone()));
+                }
+            }
+            Action::MayuDialog(show) => {
+                if edge == Edge::Down {
+                    os.output(Output::MayuDialog(*show));
+                }
+            }
+            Action::LogClear => {
+                if edge == Edge::Down {
+                    os.output(Output::LogClear);
                 }
             }
             Action::HelpVariable(title) => {
@@ -1466,6 +1480,25 @@ mod tests {
         );
         let mut e = engine(config, vec![global]);
         assert_eq!(feed(&mut e, Input::down(A)), vec![Output::ShellExecute(s)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![]);
+    }
+
+    #[test]
+    fn mayu_dialog_and_log_clear_are_output_on_press() {
+        let (config, mut global) = base();
+        let show = crate::model::ShowCommand::Show;
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::MayuDialog(show), Action::LogClear],
+        );
+        let mut e = engine(config, vec![global]);
+        assert_eq!(
+            feed(&mut e, Input::down(A)),
+            vec![Output::MayuDialog(show), Output::LogClear]
+        );
         assert_eq!(feed(&mut e, Input::up(A)), vec![]);
     }
 

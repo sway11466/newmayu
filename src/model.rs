@@ -541,6 +541,11 @@ pub enum Action {
     HelpVariable(String),
     /// `&ShellExecute(操作, ファイル, パラメータ, フォルダ, 窓の出し方)`: プログラムやファイルを開く。押したときだけ。
     ShellExecute(ShellExecute),
+    /// `&MayuDialog(Log, 窓の出し方)`: ログダイアログを出す・隠す。押したときだけ。
+    /// yamy の `Investigate`（調査ダイアログ）は newmayu に無いので読み込みエラー。
+    MayuDialog(ShowCommand),
+    /// `&LogClear`: ログを消す（ログダイアログの「ログのクリア」と同じ）。押したときだけ。
+    LogClear,
 }
 
 /// `&ShellExecute` の引数。空の文字列は yamy と同じく、操作なら `open`、それ以外なら NULL として渡す。
@@ -553,7 +558,7 @@ pub struct ShellExecute {
     pub show: ShowCommand,
 }
 
-/// `&ShellExecute` の窓の出し方（yamy の `ShowCommandType`。Win32 の `SW_*`）。
+/// `&ShellExecute` / `&MayuDialog` の窓の出し方（yamy の `ShowCommandType`。Win32 の `SW_*`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShowCommand {
     Hide,

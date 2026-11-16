@@ -26,6 +26,7 @@
 //!                                              #        | &Sync | &ClipboardUpcaseWord | &ClipboardDowncaseWord
 //!                                              #        | &HelpMessage(["タイトル" [, "本文"]]) | &HelpVariable("タイトル")
 //!                                              #        | &ShellExecute(操作, ファイル, パラメータ, フォルダ, 窓の出し方)
+//!                                              #        | &MayuDialog(Log, 窓の出し方) | &LogClear
 //!                                              # MODKEY の修飾には IL-（IME オン）IC-/I-（変換中）
 //!                                              # NL- CL- SL- KL-（NumLock CapsLock ScrollLock カナ）も書ける
 //! mod MODNAME (=|+=|-=) [!!]KEY...                # !! はワンショット（単独で押して離したらそのキー）
@@ -1182,6 +1183,36 @@ impl Loader {
                     }
                     if fname.eq_ignore_ascii_case("Sync") {
                         out.push(Action::Sync);
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("LogClear") {
+                        out.push(Action::LogClear);
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("MayuDialog") {
+                        let args = self.load_args(cur)?;
+                        let a = Args {
+                            fname: &fname,
+                            args: &args,
+                            loader: self,
+                        };
+                        a.no_more(2)?;
+                        // yamy と同じく 2 個とも要る
+                        let Some(t) = args.first() else {
+                            return self.err("`&MayuDialog`: 1 番目の引数（ダイアログ）が無い");
+                        };
+                        let dialog = self.name_of(t)?;
+                        match lower(&dialog).as_str() {
+                            "log" => {}
+                            "investigate" => {
+                                return self.err("`&MayuDialog(Investigate, …)` は未対応");
+                            }
+                            _ => {
+                                return self
+                                    .err(format!("`&MayuDialog`: ダイアログが不明: `{dialog}`"));
+                            }
+                        }
+                        out.push(Action::MayuDialog(a.show_command(1)?));
                         continue;
                     }
                     if fname.eq_ignore_ascii_case("VK") {
@@ -2381,6 +2412,42 @@ keymap Sub : Global"
         );
         load_err("key A = &ShellExecute(open, $Clipboard, , , ShowNormal)");
         load_err("key A = &ShellExecute(open, \"a\", , , ShowNormal, 1)");
+    }
+
+    #[test]
+    fn mayu_dialog_and_log_clear() {
+        let c = load_ok(
+            "key A = &MayuDialog(Log, showNormal)\n\
+             key B = &mayudialog(LOG, Hide)\n\
+             key H = &LogClear",
+        );
+        let g = global(&c);
+        assert_eq!(
+            only(g, A).actions,
+            vec![Action::MayuDialog(ShowCommand::ShowNormal)]
+        );
+        assert_eq!(
+            only(g, B).actions,
+            vec![Action::MayuDialog(ShowCommand::Hide)]
+        );
+        assert_eq!(only(g, H).actions, vec![Action::LogClear]);
+        assert!(
+            load_err("key A = &MayuDialog(Investigate, Show)")
+                .message
+                .contains("未対応")
+        );
+        assert!(
+            load_err("key A = &MayuDialog(Foo, Show)")
+                .message
+                .contains("ダイアログが不明")
+        );
+        assert!(
+            load_err("key A = &MayuDialog(Log)")
+                .message
+                .contains("窓の出し方")
+        );
+        load_err("key A = &MayuDialog()");
+        load_err("key A = &MayuDialog(Log, Show, 1)");
     }
 
     #[test]

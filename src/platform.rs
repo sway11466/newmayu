@@ -136,9 +136,12 @@ pub fn send(outputs: &[Output]) {
             Output::Press(k) => keybd_inputs(*k, false),
             Output::Release(k) => keybd_inputs(*k, true),
             Output::Vk { vk, extended, up } => vec![vk_input(*vk, *extended, *up)],
-            Output::Func { .. } | Output::Sync | Output::Help { .. } | Output::ShellExecute(_) => {
-                Vec::new()
-            }
+            Output::Func { .. }
+            | Output::Sync
+            | Output::Help { .. }
+            | Output::ShellExecute(_)
+            | Output::MayuDialog(_)
+            | Output::LogClear => Vec::new(),
         })
         .collect();
     if inputs.is_empty() {

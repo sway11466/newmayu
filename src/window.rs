@@ -588,7 +588,7 @@ pub fn shell_execute(s: ShellExecute) {
     });
 }
 
-fn show_command(s: ShowCommand) -> SHOW_WINDOW_CMD {
+pub(crate) fn show_command(s: ShowCommand) -> SHOW_WINDOW_CMD {
     match s {
         ShowCommand::Hide => SW_HIDE,
         ShowCommand::Maximize => SW_MAXIMIZE,

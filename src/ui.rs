@@ -39,6 +39,8 @@ pub enum Command {
     Setting,
     /// 一時停止の切り替え。`true` なら停止、`false` なら再開。
     Pause(bool),
+    /// ログダイアログを出す。
+    Log,
     Exit,
 }
 
@@ -49,6 +51,7 @@ const ID_RELOAD: usize = 1;
 const ID_PAUSE: usize = 2;
 const ID_EXIT: usize = 3;
 const ID_SETTING: usize = 4;
+const ID_LOG: usize = 5;
 /// 「選択」の項目。`.mayuN` は `ID_SELECT_BEGIN + N`（yamy の `ID_MENUITEM_reloadBegin`）。
 const ID_SELECT_BEGIN: usize = 1000;
 
@@ -193,6 +196,8 @@ fn popup(hwnd: HWND, paused: bool) -> Option<Command> {
                 && AppendMenuW(menu, MF_SEPARATOR, 0, None).is_ok()
                 && AppendMenuW(menu, pause_flags, ID_PAUSE, w!("一時停止")).is_ok()
                 && AppendMenuW(menu, MF_SEPARATOR, 0, None).is_ok()
+                && AppendMenuW(menu, MF_STRING, ID_LOG, w!("ログ(&L)...")).is_ok()
+                && AppendMenuW(menu, MF_SEPARATOR, 0, None).is_ok()
                 && AppendMenuW(menu, MF_STRING, ID_EXIT, w!("終了")).is_ok()
         };
     let mut chosen = BOOL(0);
@@ -224,6 +229,7 @@ fn popup(hwnd: HWND, paused: bool) -> Option<Command> {
         ID_RELOAD => Some(Command::Reload),
         ID_SETTING => Some(Command::Setting),
         ID_PAUSE => Some(Command::Pause(!paused)),
+        ID_LOG => Some(Command::Log),
         ID_EXIT => Some(Command::Exit),
         id if id >= ID_SELECT_BEGIN => Some(Command::Select(id - ID_SELECT_BEGIN)),
         _ => None,
