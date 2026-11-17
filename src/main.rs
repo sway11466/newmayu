@@ -280,7 +280,8 @@ impl Pressed {
                 | Output::MayuDialog(_)
                 | Output::LogClear
                 | Output::InvestigateCommand
-                | Output::LoadSetting(_) => {}
+                | Output::LoadSetting(_)
+                | Output::DescribeBindings(_) => {}
             }
         }
     }
@@ -390,6 +391,14 @@ impl Os for Exec<'_> {
             Output::LoadSetting(name) => {
                 self.flush();
                 load_setting(&name);
+            }
+            Output::DescribeBindings(lines) => {
+                self.flush();
+                // yamy と同じく、詳細のときだけ前に空行を出す
+                log_detail!("");
+                for l in lines {
+                    log!("{l}");
+                }
             }
         }
     }

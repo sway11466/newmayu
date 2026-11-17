@@ -138,7 +138,7 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 |---|---|---|---|
 | `&HelpMessage([title, message])` | トレイ付近にメッセージを出す。引数なしで消す | ○ | 出し方は yamy と異なる（6 章） |
 | `&HelpVariable(title)` | 内部変数の値を title と一緒に出す | ○ | 出し方は 6 章 |
-| `&DescribeBindings` | いまのキーマップの割付を表示する | × | |
+| `&DescribeBindings` | いまのキーマップの割付を表示する | ○ | yamy は `&Repeat` と `&EmacsEditKillLinePred` の動作列の引数を、プログラム内部のメモリの番地で出す。実装の都合が漏れたものと想定し、`$keyseq名`（`( … )` で書いたものは `$`）を出すように変えた |
 | `&InvestigateCommand` | 窓に届く WM_COMMAND / WM_SYSCOMMAND をログに出すモードの切り替え | ○ | yamy は宛先が ToItself などの名前で表せないとき、フォーカス窓から何段目の親かを出す処理の直後で必ず抜け、何も出さない。バグと想定し、番号を出す（期待する動作）に変えた |
 | `&LoadSetting([設定名])` | 設定を読み直す | ○ | |
 | `&MayuDialog(Investigate\|Log, HIDE\|SHOW\|SHOWNA…)` | 調査 / ログのダイアログを出す・隠す | △ | `Log` のみ。`Investigate` は調査ダイアログが無いので読み込みエラー |

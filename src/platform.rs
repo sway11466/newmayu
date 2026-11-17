@@ -143,7 +143,8 @@ pub fn send(outputs: &[Output]) {
             | Output::MayuDialog(_)
             | Output::LogClear
             | Output::InvestigateCommand
-            | Output::LoadSetting(_) => Vec::new(),
+            | Output::LoadSetting(_)
+            | Output::DescribeBindings(_) => Vec::new(),
         })
         .collect();
     if inputs.is_empty() {

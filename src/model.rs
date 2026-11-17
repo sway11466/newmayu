@@ -551,6 +551,8 @@ pub enum Action {
     /// `&LoadSetting([名前])`: 設定を読み直す。名前があれば、設定の一覧でその名前の設定を選んでから。
     /// 空なら名前なし。押したときだけ。
     LoadSetting(String),
+    /// `&DescribeBindings`: いまの窓で効いている割付をログに出す。押したときだけ。
+    DescribeBindings,
 }
 
 /// `&ShellExecute` の引数。空の文字列は yamy と同じく、操作なら `open`、それ以外なら NULL として渡す。
@@ -588,7 +590,7 @@ pub struct HelpText {
 }
 
 /// `event 名 = 動作…` の名前。yamy の `Event`。キーマップごとに持つ。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EventKind {
     /// `prefixed`: `&Prefix` で遷移した直後。遷移先のキーマップのものが動く。
     Prefixed,
@@ -795,6 +797,8 @@ pub struct Assignment {
     pub edge: EdgeSpec,
     pub locks: LockSpec,
     pub actions: Vec<Action>,
+    /// `&DescribeBindings` で出す右辺（yamy の形。[`crate::describe::seq_text`]）。読み込み時に作る。
+    pub text: String,
 }
 
 /// `keymap 名 : 親` / `window 名 /re/ : 親` の 1 つ。
@@ -817,6 +821,10 @@ pub struct Keymap {
     pub assignments: Vec<Assignment>,
     /// `event 名 = 動作…`。
     pub events: [Option<Vec<Action>>; EventKind::ALL.len()],
+    /// `&DescribeBindings` で出す既定動作（yamy の形）。
+    pub default_text: String,
+    /// `&DescribeBindings` で出す `event` の右辺（yamy の形）。
+    pub event_texts: [String; EventKind::ALL.len()],
 }
 
 impl Keymap {
@@ -831,6 +839,8 @@ impl Keymap {
             one_shot_keys: Default::default(),
             assignments: Vec::new(),
             events: Default::default(),
+            default_text: "&KeymapParent ".to_string(),
+            event_texts: Default::default(),
         }
     }
 
@@ -839,6 +849,7 @@ impl Keymap {
         Keymap {
             window: Some(WindowMatch::any()),
             default_actions: vec![Action::OtherWindowClass],
+            default_text: "&OtherWindowClass ".to_string(),
             ..Keymap::new("Global", None)
         }
     }
@@ -872,12 +883,26 @@ impl Keymap {
         locks: LockSpec,
         actions: Vec<Action>,
     ) {
+        self.assign_text(key, mods, edge, locks, actions, String::new());
+    }
+
+    /// [`Keymap::assign`] に、`&DescribeBindings` で出す右辺 `text` を付けたもの。
+    pub fn assign_text(
+        &mut self,
+        key: Key,
+        mods: ModSpec,
+        edge: EdgeSpec,
+        locks: LockSpec,
+        actions: Vec<Action>,
+        text: String,
+    ) {
         if let Some(a) = self
             .assignments
             .iter_mut()
             .find(|a| a.key == key && a.mods == mods && a.edge == edge && a.locks == locks)
         {
             a.actions = actions;
+            a.text = text;
             return;
         }
         self.assignments.insert(
@@ -888,13 +913,20 @@ impl Keymap {
                 edge,
                 locks,
                 actions,
+                text,
             },
         );
     }
 
     /// `event 名 = 動作…`。同じ名前は置き換える。
     pub fn set_event(&mut self, kind: EventKind, actions: Vec<Action>) {
+        self.set_event_text(kind, actions, String::new());
+    }
+
+    /// [`Keymap::set_event`] に、`&DescribeBindings` で出す右辺 `text` を付けたもの。
+    pub fn set_event_text(&mut self, kind: EventKind, actions: Vec<Action>, text: String) {
         self.events[kind.index()] = Some(actions);
+        self.event_texts[kind.index()] = text;
     }
 
     pub fn event(&self, kind: EventKind) -> Option<&[Action]> {
@@ -941,6 +973,8 @@ pub struct Config {
     pub sync: Option<Key>,
     /// `def subst`。キーマップに関係なく全体で 1 つ。照合する順（後に書いたものが先）に並ぶ。
     pub substs: Vec<Subst>,
+    /// `def key` の最初の名前（yamy の `Key::getName`）。`&DescribeBindings` で使う。
+    pub key_names: Vec<(Key, String)>,
 }
 
 impl Config {
@@ -951,6 +985,15 @@ impl Config {
             def_mods: Default::default(),
             sync: None,
             substs: Vec::new(),
+            key_names: Vec::new(),
+        }
+    }
+
+    /// キーの名前（`def key` の最初の名前）。定義の無いキーはスキャンコードで書く。
+    pub fn key_name(&self, key: Key) -> String {
+        match self.key_names.iter().find(|(k, _)| *k == key) {
+            Some((_, n)) => n.clone(),
+            None => format!("{key:?}"),
         }
     }
 

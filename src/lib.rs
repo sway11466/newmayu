@@ -4,6 +4,7 @@
 //! - `engine` : キー入力を受けて出力を決める状態機械（OS 非依存）
 //! - `platform`: Win32 との結線（`SendInput`・フック構造体の変換）
 //! - `config` : `.mayu` の読み込み（字句解析・構文解析→ `model::Config`）
+//! - `describe`: `&DescribeBindings` の書き出し（yamy の形）
 //! - `notify` : フック DLL（`newmayu-hook`）の読み込みと、そこから届く通知の受信
 //! - `window` : 窓を操作する `&関数`（`&WindowMove` など）の Win32 側
 //! - `log`    : ログ（時刻付き。標準エラーか `--log` のファイル、とログダイアログ）
@@ -15,6 +16,7 @@
 //! - `help`   : 案内の窓（`&HelpMessage` / `&HelpVariable`。yamy と異なる）
 
 pub mod config;
+pub mod describe;
 mod dialog;
 pub mod engine;
 pub mod help;

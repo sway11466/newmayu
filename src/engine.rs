@@ -81,6 +81,8 @@ pub enum Output {
     InvestigateCommand,
     /// `&LoadSetting([名前])`: 設定を読み直す。空なら名前なし。
     LoadSetting(String),
+    /// `&DescribeBindings`: いまの窓で効いている割付（ログに出す行）。
+    DescribeBindings(Vec<String>),
 }
 
 /// エンジンが出力を渡す先（OS 窓口）。本体は `SendInput` などで実行し、テストは記録する。
@@ -697,6 +699,14 @@ impl Engine {
             Action::LoadSetting(name) => {
                 if edge == Edge::Down {
                     os.output(Output::LoadSetting(name.clone()));
+                }
+            }
+            Action::DescribeBindings => {
+                if edge == Edge::Down {
+                    os.output(Output::DescribeBindings(crate::describe::describe(
+                        &self.config,
+                        &self.focus,
+                    )));
                 }
             }
             Action::HelpVariable(title) => {
@@ -1499,6 +1509,25 @@ mod tests {
         );
         let mut e = engine(config, vec![global]);
         assert_eq!(feed(&mut e, Input::down(A)), vec![Output::ShellExecute(s)]);
+        assert_eq!(feed(&mut e, Input::up(A)), vec![]);
+    }
+
+    #[test]
+    fn describe_bindings_is_output_on_press() {
+        let (config, mut global) = base();
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::DescribeBindings],
+        );
+        let mut e = engine(config, vec![global]);
+        let out = feed(&mut e, Input::down(A));
+        let [Output::DescribeBindings(lines)] = out.as_slice() else {
+            panic!("{out:?}");
+        };
+        assert!(lines[0].starts_with("window Global "));
         assert_eq!(feed(&mut e, Input::up(A)), vec![]);
     }
 

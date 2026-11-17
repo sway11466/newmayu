@@ -26,14 +26,6 @@
 - 対応：TSF の `ITfThreadMgr` / `ITfContext` の状態を DLL の中から読む、または `ITfUIElementSink` 系の通知を受ける方法を調べ、取れる方法で DLL に足す。
 - 該当：`hook/src/lib.rs`・`ipc/src/lib.rs`。
 
-### feature-12
-
-**&DescribeBindings**
-- ゴール：`&DescribeBindings` を含む `.mayu` が読め、押すと yamy と同じくいまのキーマップの割付が見られる。
-- 背景：オーナーの Word.mayu が C-S-Slash に割り付けている。yamy はログに出す。いまは読み込みエラーにしている。
-- 対応：(1) パーサーに足す。(2) いまのキーマップと親の割付を並べて出す。未決：出し先（ログだけか、窓を出すか）。
-- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
-
 ### feature-15
 
 **ブラウザの入力欄での &Recenter**
@@ -56,6 +48,7 @@
 - 設定の一覧：yamy の `yamy.ini` を newmayu.exe と同じフォルダに置くと、選択中の設定が読まれる。トレイの「選択」に一覧が並び、選ぶとその設定に切り替わる。「設定」でダイアログが出て、追加・編集・削除・並べ替え・参照ができ、OK で `yamy.ini` に書かれて読み直される。`yamy.ini` も `.mayu` も無いと、起動時に設定ダイアログが出る。
 - 案内の窓（&HelpMessage / &HelpVariable）：出たとき、ピンを押したときに、フォーカス窓からフォーカスを奪わない。
 - &WindowIdentify / &InvestigateCommand / &LoadSetting：default.mayu の C-S-D でフォーカス窓の CLASS・TITLE・位置と大きさがログに出る（コンソールでも出る）。C-S-F1 の後にメニューやボタンを使うと `&PostMessage(…)` の行が出て、もう一度 C-S-F1 で止まる。C-S-S で設定が読み直される。`&LoadSetting("名前")` でその名前の設定に切り替わり、一覧に無い名前ならログに `unknown setting name` が出る。
+- &DescribeBindings：Word で C-S-/ を押すと、ログに Word のキーマップから Global までの割付が yamy と同じ形で並ぶ。
 - ログダイアログ：トレイの「ログ」で出て、起動時の見出しと設定の読み込みのログが並ぶ。「詳細」を付けるとキー変換・フォーカスの行も出る。「ログのクリア」で消えて見出しが出直す。「フォントの変更」でログの文字がすぐ変わり、`yamy.ini` の `logFont` に書かれる。「閉じる」で隠れる。default.mayu などの `&MayuDialog(Log, …)` / `&LogClear` も同じく効く。再読込に失敗するとログダイアログが出る。
 
 ## parking lot

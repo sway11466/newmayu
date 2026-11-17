@@ -52,6 +52,7 @@ use std::path::{Path, PathBuf};
 
 use super::lexer::{Line, Token, tokenize};
 use super::vkeys::vk_by_name;
+use crate::describe;
 use crate::model::{
     Action, BasicMod, Config, EdgeSpec, EventKind, Func, Gravity, HelpText, Key, Keymap, KeymapId,
     LockMod, LockSpec, ModSpec, ScanCode, ScanPrefix, ShellExecute, ShowCommand, Subst, Target,
@@ -131,6 +132,8 @@ struct KeymapBuild {
 struct Loader {
     /// `def key` で定義したキー。
     keys: Vec<Key>,
+    /// `keys` と同じ並びの、`def key` の最初の名前（`&DescribeBindings` 用）。
+    key_names: Vec<String>,
     /// キー名（小文字化）→ `keys` の添字。
     names: HashMap<String, usize>,
     /// `def alias` の別名（小文字化）→ `keys` の添字。
@@ -143,6 +146,8 @@ struct Loader {
     can_read: Vec<bool>,
     /// `keyseq $名`（小文字化）→ 展開済みの動作列。
     keyseqs: HashMap<String, Vec<Action>>,
+    /// `keyseq $名`（小文字化）→ 書かれた名前（`&DescribeBindings` 用）。
+    keyseq_names: HashMap<String, String>,
     /// `def sync`。
     sync: Option<Key>,
     /// `def subst`。照合する順（後に書いたものが先）。
@@ -154,6 +159,17 @@ struct Loader {
     /// エラー表示用。読んでいるファイルと行。
     file: String,
     line: usize,
+}
+
+/// `&WindowClingToLeft` 等の yamy の名前。
+fn cling_name(fname: &str) -> Option<&'static str> {
+    match lower(fname).as_str() {
+        "windowclingtoleft" => Some("WindowClingToLeft"),
+        "windowclingtoright" => Some("WindowClingToRight"),
+        "windowclingtotop" => Some("WindowClingToTop"),
+        "windowclingtobottom" => Some("WindowClingToBottom"),
+        _ => None,
+    }
 }
 
 /// 1 文のトークン列を前から読むカーソル。
@@ -437,12 +453,14 @@ impl Loader {
         keymap_names.insert("global".to_string(), 0);
         Loader {
             keys: Vec::new(),
+            key_names: Vec::new(),
             names: HashMap::new(),
             aliases: HashMap::new(),
             def_mods: Default::default(),
             symbols: HashSet::new(),
             can_read: Vec::new(),
             keyseqs: HashMap::new(),
+            keyseq_names: HashMap::new(),
             sync: None,
             substs: Vec::new(),
             keymaps: vec![global],
@@ -778,6 +796,7 @@ impl Loader {
             self.names.insert(l, idx);
         }
         self.keys.push(key);
+        self.key_names.push(names[0].clone());
         Ok(())
     }
 
@@ -890,7 +909,7 @@ impl Loader {
         let mut default_actions = None;
         if cur.peek_sym("=") || cur.peek_sym("=>") {
             cur.next();
-            default_actions = Some(self.load_actions(cur, false, false)?);
+            default_actions = Some(self.load_actions_text(cur, false, false)?);
         }
         self.expect_end(cur)?;
         let l = lower(&name);
@@ -903,7 +922,7 @@ impl Loader {
                     "キーマップ `{name}` は定義済みで、親は変えられない"
                 ));
             }
-            if default_actions.is_some_and(|a| a != km.default_actions) {
+            if default_actions.is_some_and(|(a, _)| a != km.default_actions) {
                 return self.err(format!(
                     "キーマップ `{name}` は定義済みで、既定動作は変えられない"
                 ));
@@ -919,8 +938,9 @@ impl Loader {
         let idx = self.keymaps.len();
         let mut keymap = Keymap::new(name, parent);
         keymap.window = window;
-        if let Some(a) = default_actions {
+        if let Some((a, text)) = default_actions {
             keymap.default_actions = a;
+            keymap.default_text = text;
         }
         self.keymaps.push(KeymapBuild {
             keymap,
@@ -958,15 +978,18 @@ impl Loader {
             ));
         };
         self.expect_sym(cur, "=")?;
-        let actions = self.load_actions(cur, false, false)?;
-        self.keymaps[self.current].keymap.set_event(kind, actions);
+        let (actions, text) = self.load_actions_text(cur, false, false)?;
+        self.keymaps[self.current]
+            .keymap
+            .set_event_text(kind, actions, text);
         Ok(())
     }
 
     /// `&Repeat(( ACTION... ) | $keyseq名 [, 上限])`。上限の既定は 10（yamy と同じ）。
-    fn load_repeat(&mut self, cur: &mut Cur) -> Result<Action> {
+    /// 戻り値の 2 つ目は `&DescribeBindings` で出す形。
+    fn load_repeat(&mut self, cur: &mut Cur) -> Result<(Action, String)> {
         self.expect_sym(cur, "(")?;
-        let actions = self.load_key_seq_arg(cur, "&Repeat の 1 番目の引数")?;
+        let (actions, seq) = self.load_key_seq_arg(cur, "&Repeat の 1 番目の引数")?;
         let max = if cur.peek_sym(",") {
             cur.next();
             match cur.next() {
@@ -980,30 +1003,38 @@ impl Loader {
             10
         };
         self.expect_sym(cur, ")")?;
-        Ok(Action::Repeat { actions, max })
+        Ok((
+            Action::Repeat { actions, max },
+            describe::repeat_text(&seq, max),
+        ))
     }
 
     /// `&EmacsEditKillLinePred(( ACTION... ) | $keyseq名, ( ACTION... ) | $keyseq名)`。
-    fn load_kill_line_pred(&mut self, cur: &mut Cur) -> Result<Action> {
+    /// 戻り値の 2 つ目は `&DescribeBindings` で出す形。
+    fn load_kill_line_pred(&mut self, cur: &mut Cur) -> Result<(Action, String)> {
         self.expect_sym(cur, "(")?;
-        let seq1 = self.load_key_seq_arg(cur, "&EmacsEditKillLinePred の 1 番目の引数")?;
+        let (seq1, t1) = self.load_key_seq_arg(cur, "&EmacsEditKillLinePred の 1 番目の引数")?;
         self.expect_sym(cur, ",")?;
-        let seq2 = self.load_key_seq_arg(cur, "&EmacsEditKillLinePred の 2 番目の引数")?;
+        let (seq2, t2) = self.load_key_seq_arg(cur, "&EmacsEditKillLinePred の 2 番目の引数")?;
         self.expect_sym(cur, ")")?;
-        Ok(Action::EmacsEditKillLinePred { seq1, seq2 })
+        Ok((
+            Action::EmacsEditKillLinePred { seq1, seq2 },
+            describe::kill_line_pred_text(&t1, &t2),
+        ))
     }
 
     /// 動作列の引数 `( ACTION... )` か `$keyseq名`（yamy の `load_ARGUMENT(const KeySeq **)`）。
-    fn load_key_seq_arg(&mut self, cur: &mut Cur, what: &str) -> Result<Vec<Action>> {
+    /// 戻り値の 2 つ目は `&DescribeBindings` で出す形（`$名`。`( … )` は yamy の無名の keyseq で `$`）。
+    fn load_key_seq_arg(&mut self, cur: &mut Cur, what: &str) -> Result<(Vec<Action>, String)> {
         match cur.next() {
-            Some(Token::Sym("(")) => self.load_actions(cur, true, false),
+            Some(Token::Sym("(")) => Ok((self.load_actions(cur, true, false)?, "$".to_string())),
             Some(Token::Sym("$")) => {
                 let Some(t) = cur.next() else {
                     return self.err("`$` の後は keyseq 名");
                 };
                 let name = self.name_of(t)?;
                 match self.keyseqs.get(&lower(&name)) {
-                    Some(seq) => Ok(seq.clone()),
+                    Some(seq) => Ok((seq.clone(), format!("${}", self.keyseq_name(&name)))),
                     None => self.err(format!("keyseq `${name}` は未定義")),
                 }
             }
@@ -1035,10 +1066,10 @@ impl Loader {
                 _ => {}
             }
         }
-        let actions = self.load_actions(cur, false, false)?;
+        let (actions, text) = self.load_actions_text(cur, false, false)?;
         let km = &mut self.keymaps[self.current].keymap;
         for (key, m) in lhs {
-            km.assign(key, m.mods, m.edge, m.locks, actions.clone());
+            km.assign_text(key, m.mods, m.edge, m.locks, actions.clone(), text.clone());
         }
         Ok(())
     }
@@ -1114,6 +1145,7 @@ impl Loader {
         let name = self.name_of(t)?;
         self.expect_sym(cur, "=")?;
         let actions = self.load_actions(cur, false, true)?;
+        self.keyseq_names.insert(lower(&name), name.clone());
         self.keyseqs.insert(lower(&name), actions);
         Ok(())
     }
@@ -1130,6 +1162,69 @@ impl Loader {
         locks_ok: bool,
     ) -> Result<Vec<Action>> {
         let mut out = Vec::new();
+        self.load_actions_into(cur, in_paren, locks_ok, &mut out, &mut Vec::new())?;
+        Ok(out)
+    }
+
+    /// [`Loader::load_actions`] と、`&DescribeBindings` で出す右辺（yamy の形）。
+    fn load_actions_text(
+        &mut self,
+        cur: &mut Cur,
+        in_paren: bool,
+        locks_ok: bool,
+    ) -> Result<(Vec<Action>, String)> {
+        let mut out = Vec::new();
+        let mut spans = Vec::new();
+        self.load_actions_into(cur, in_paren, locks_ok, &mut out, &mut spans)?;
+        // 動作ごとに書き、`spans` の範囲（`$名` など）はその文字列にする
+        let mut items = Vec::new();
+        let mut i = 0;
+        for (start, end, text) in spans {
+            while i < start {
+                items.push(self.action_text(&out[i]));
+                i += 1;
+            }
+            items.push(text);
+            i = end;
+        }
+        while i < out.len() {
+            items.push(self.action_text(&out[i]));
+            i += 1;
+        }
+        Ok((out, describe::seq_text(&items)))
+    }
+
+    /// 1 つの動作の yamy の形。
+    fn action_text(&self, a: &Action) -> String {
+        let key_name = |k: Key| {
+            self.keys
+                .iter()
+                .position(|x| *x == k)
+                .map(|i| self.key_names[i].clone())
+                .unwrap_or_else(|| format!("{k:?}"))
+        };
+        let keymap_name = |k: KeymapId| self.keymaps[k.0].keymap.name.clone();
+        describe::action_text(a, &key_name, &keymap_name)
+    }
+
+    /// `keyseq` の書かれた名前。
+    fn keyseq_name(&self, name: &str) -> String {
+        self.keyseq_names
+            .get(&lower(name))
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// `out` に動作を足す。`spans` には、動作から書けない部分（`$名` など）の
+    /// （`out` の始め, 終わり, 書き方）を足す。
+    fn load_actions_into(
+        &mut self,
+        cur: &mut Cur,
+        in_paren: bool,
+        locks_ok: bool,
+        out: &mut Vec<Action>,
+        spans: &mut Vec<(usize, usize, String)>,
+    ) -> Result<()> {
         while !cur.at_end() {
             let mut m = self.load_modifier(cur)?;
             if !locks_ok {
@@ -1142,10 +1237,13 @@ impl Loader {
                 return self.err("修飾の後にキー名が無い");
             };
             match t {
-                Token::Sym(")") if in_paren => return Ok(out),
+                Token::Sym(")") if in_paren => return Ok(()),
                 Token::Sym("(") => {
+                    let start = out.len();
                     let inner = self.load_actions(cur, true, locks_ok)?;
                     out.extend(inner);
+                    // yamy は無名の keyseq にする
+                    spans.push((start, out.len(), "$".to_string()));
                 }
                 Token::Sym("$") => {
                     let Some(t) = cur.next() else {
@@ -1155,7 +1253,9 @@ impl Loader {
                     let Some(seq) = self.keyseqs.get(&lower(&name)) else {
                         return self.err(format!("keyseq `${name}` は未定義"));
                     };
+                    let start = out.len();
                     out.extend(seq.iter().cloned());
+                    spans.push((start, out.len(), format!("${}", self.keyseq_name(&name))));
                 }
                 Token::Sym("&") => {
                     let Some(t) = cur.next() else {
@@ -1188,6 +1288,10 @@ impl Loader {
                     }
                     if fname.eq_ignore_ascii_case("LogClear") {
                         out.push(Action::LogClear);
+                        continue;
+                    }
+                    if fname.eq_ignore_ascii_case("DescribeBindings") {
+                        out.push(Action::DescribeBindings);
                         continue;
                     }
                     if fname.eq_ignore_ascii_case("InvestigateCommand") {
@@ -1250,7 +1354,9 @@ impl Loader {
                         continue;
                     }
                     if fname.eq_ignore_ascii_case("Repeat") {
-                        out.push(self.load_repeat(cur)?);
+                        let (a, text) = self.load_repeat(cur)?;
+                        spans.push((out.len(), out.len() + 1, text));
+                        out.push(a);
                         continue;
                     }
                     if fname.eq_ignore_ascii_case("EmacsEditKillLineFunc") {
@@ -1258,7 +1364,9 @@ impl Loader {
                         continue;
                     }
                     if fname.eq_ignore_ascii_case("EmacsEditKillLinePred") {
-                        out.push(self.load_kill_line_pred(cur)?);
+                        let (a, text) = self.load_kill_line_pred(cur)?;
+                        spans.push((out.len(), out.len() + 1, text));
+                        out.push(a);
                         continue;
                     }
                     if fname.eq_ignore_ascii_case("HelpMessage") {
@@ -1319,6 +1427,16 @@ impl Loader {
                         continue;
                     }
                     if let Some(f) = self.load_func(&fname, cur)? {
+                        // `&WindowClingToLeft` 等は `&WindowMoveTo` として持つので、名前で書く
+                        if let Func::WindowMoveTo { target, .. } = f
+                            && let Some(canon) = cling_name(&fname)
+                        {
+                            spans.push((
+                                out.len(),
+                                out.len() + 1,
+                                describe::cling_text(canon, target),
+                            ));
+                        }
                         out.push(Action::Func(f));
                         continue;
                     }
@@ -1341,7 +1459,7 @@ impl Loader {
         if in_paren {
             return self.err("`)` が無い");
         }
-        Ok(out)
+        Ok(())
     }
 
     /// OS 側で実行する `&関数` とその引数。知らない名前なら `None`。
@@ -1750,6 +1868,11 @@ impl Loader {
         let mut config = Config::new(resolved);
         for (i, keys) in self.def_mods.iter().enumerate() {
             config.def_mod(BasicMod::ALL[i], keys.iter().copied());
+        }
+        for (k, n) in self.keys.iter().zip(&self.key_names) {
+            if !config.key_names.iter().any(|(c, _)| c == k) {
+                config.key_names.push((*k, n.clone()));
+            }
         }
         config.keys = self.keys;
         config.sync = self.sync;
@@ -2430,6 +2553,33 @@ keymap Sub : Global"
         );
         load_err("key A = &ShellExecute(open, $Clipboard, , , ShowNormal)");
         load_err("key A = &ShellExecute(open, \"a\", , , ShowNormal, 1)");
+    }
+
+    #[test]
+    fn describe_text_is_made_while_loading() {
+        let c = load_ok(
+            "keyseq $Seq = C-BS\n\
+             keymap Sub = &Ignore\n\
+             keymap Global\n\
+             key A = *BS $Seq ( H Space ) &WindowClingToLeft &Repeat($Seq) &DescribeBindings\n\
+             key B = &EmacsEditKillLinePred(( H ), $Seq) &Prefix(Sub)\n\
+             event prefixed = &Sync",
+        );
+        let g = global(&c);
+        assert_eq!(
+            only(g, A).text,
+            "BackSpace $Seq $ &WindowClingToLeft(overlapped)  &Repeat($Seq, 10)  &DescribeBindings "
+        );
+        assert_eq!(
+            only(g, B).text,
+            "&EmacsEditKillLinePred($, $Seq)  &Prefix(Sub, true)  "
+        );
+        assert_eq!(g.event_texts[EventKind::Prefixed.index()], "&Sync ");
+        assert_eq!(c.keymaps[1].default_text, "&Ignore ");
+        assert_eq!(global(&c).default_text, "&OtherWindowClass ");
+        // キーの名前は def key の最初の名前
+        assert_eq!(c.key_name(BS), "BackSpace");
+        assert_eq!(only(g, A).actions.last(), Some(&Action::DescribeBindings));
     }
 
     #[test]
