@@ -4,7 +4,7 @@
 
 ## index
 
-次回採番: bug=2 / feature=18 / refactoring=1.
+次回採番: bug=3 / feature=19 / refactoring=1.
 
 項目（バグ bug / 機能追加 feature / リファクタリング refactoring）を追加するときは、該当カテゴリの採番を +1 して ID を継ぐ。完了した項目は本書から削除し、番号は再利用しない（過去の使用済み番号は `git log -p -- doc/backlog.md | grep -oE '(bug|feature|refactoring)-[0-9]+' | sort -u` で確認できる）。状態は「本書に載っていれば未完了／消えていれば完了」で表す（状態列は持たない）。ゴールは、その作業で何が達成されていれば終わりなのかを1文で書く。手段ではなく到達点を書く。
 
@@ -14,9 +14,25 @@
 
 判明済みの不具合。採番は本書冒頭「index」。各エントリは 背景／ゴール／対応／該当 で記す。
 
+### bug-2
+
+**`\` で終わるコメントが次の行を飲み込む**
+- ゴール：コメントの中の行末 `\` では行がつながらず、109.mayu・104.mayu の `$RIGHT_SQUARE_BRACKET` が定義される。109＋104on109 の default.mayu が読める。
+- 背景：109.mayu・104.mayu の `keyseq $REVERSE_SOLIDUS … # \` の次の行が消える。yamy はコメントの外で行の最後の文字が `\` のときだけ次の行へつなぐ（parser.cpp の getLine）。newmayu はコメントを見る前に行末の `\` でつなぐ。
+- 対応：行の継続を yamy と同じく、字句を読む途中で `\` が行の最後に来たときだけにする。
+- 該当：`src/config/lexer.rs`。
+
 ## 機能追加
 
 実装済みコードに足す機能。採番は本書冒頭「index」。各エントリは 背景／ゴール／対応／該当 で記す。
+
+### feature-18
+
+**&EditNextModifier**
+- ゴール：`define MAP-ESCAPE-TO-META` のときの default.mayu が読め、Escape の次のキーに `M-` が付いたものとして yamy と同じく効く。
+- 背景：default.mayu・emacsedit.mayu・workaround.mayu が MAP-ESCAPE-TO-META のときに `&Prefix(…) &EditNextModifier(M-)` を使う。newmayu では読み込みエラーになる。
+- 対応：mayu と yamy の `&EditNextModifier` の動きを調べて足す。
+- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
 
 ### feature-7
 
