@@ -345,7 +345,7 @@ pub fn action_text(
             edge,
             locks,
         } => modified_key_text(&key_name(*key), *mods, *edge, *locks),
-        Action::Prefix(k) => func("Prefix", &[keymap_name(*k), "true".to_string()]),
+        Action::Prefix(k, ignore) => func("Prefix", &[keymap_name(*k), ignore.to_string()]),
         Action::Keymap(k) => func("Keymap", &[keymap_name(*k)]),
         Action::Default => "&Default".to_string(),
         Action::KeymapParent => "&KeymapParent".to_string(),
@@ -601,7 +601,11 @@ mod tests {
     #[test]
     fn functions_are_like_yamy() {
         assert_eq!(t(&Action::Sync), "&Sync");
-        assert_eq!(t(&Action::Prefix(KeymapId(1))), "&Prefix(Sub, true) ");
+        assert_eq!(t(&Action::Prefix(KeymapId(1), true)), "&Prefix(Sub, true) ");
+        assert_eq!(
+            t(&Action::Prefix(KeymapId(1), false)),
+            "&Prefix(Sub, false) "
+        );
         assert_eq!(
             t(&Action::Func(Func::WindowMoveTo {
                 gravity: Gravity::NorthWest,

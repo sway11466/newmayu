@@ -4,7 +4,7 @@
 
 ## index
 
-次回採番: bug=3 / feature=19 / refactoring=1.
+次回採番: bug=3 / feature=20 / refactoring=1.
 
 項目（バグ bug / 機能追加 feature / リファクタリング refactoring）を追加するときは、該当カテゴリの採番を +1 して ID を継ぐ。完了した項目は本書から削除し、番号は再利用しない（過去の使用済み番号は `git log -p -- doc/backlog.md | grep -oE '(bug|feature|refactoring)-[0-9]+' | sort -u` で確認できる）。状態は「本書に載っていれば未完了／消えていれば完了」で表す（状態列は持たない）。ゴールは、その作業で何が達成されていれば終わりなのかを1文で書く。手段ではなく到達点を書く。
 
@@ -57,6 +57,7 @@
 - 案内の窓（&HelpMessage / &HelpVariable）：出たとき、ピンを押したときに、フォーカス窓からフォーカスを奪わない。
 - &WindowIdentify / &InvestigateCommand / &LoadSetting：default.mayu の C-S-D でフォーカス窓の CLASS・TITLE・位置と大きさがログに出る（コンソールでも出る）。C-S-F1 の後にメニューやボタンを使うと `&PostMessage(…)` の行が出て、もう一度 C-S-F1 で止まる。C-S-S で設定が読み直される。`&LoadSetting("名前")` でその名前の設定に切り替わり、一覧に無い名前ならログに `unknown setting name` が出る。
 - &DescribeBindings：Word で C-S-/ を押すと、ログに Word のキーマップから Global までの割付が yamy と同じ形で並ぶ。
+- &Prefix の ignore_modifiers：emacsedit.mayu の C-X の後に Shift などの修飾キーを押しても、OS へは送られない（2 ストローク目の修飾としてだけ効く）。
 - ログダイアログ：トレイの「ログ」で出て、起動時の見出しと設定の読み込みのログが並ぶ。「詳細」を付けるとキー変換・フォーカスの行も出る。「ログのクリア」で消えて見出しが出直す。「フォントの変更」でログの文字がすぐ変わり、`yamy.ini` の `logFont` に書かれる。「閉じる」で隠れる。default.mayu などの `&MayuDialog(Log, …)` / `&LogClear` も同じく効く。再読込に失敗するとログダイアログが出る。
 
 ## parking lot

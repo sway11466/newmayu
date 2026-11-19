@@ -488,8 +488,9 @@ pub enum Action {
         edge: EdgeSpec,
         locks: LockSpec,
     },
-    /// `&Prefix(キーマップ)`: 次の 1 キーだけ指定キーマップで解決する。
-    Prefix(KeymapId),
+    /// `&Prefix(キーマップ, ignore_modifiers)`: 次の 1 キーだけ指定キーマップで解決する。
+    /// ignore_modifiers なら、そのあいだ修飾キーを真のモディファイヤ（OS へ送らない）にする。
+    Prefix(KeymapId, bool),
     /// `&Keymap(キーマップ)`: いまのキーを指定キーマップで引き直す。
     Keymap(KeymapId),
     /// `&Default`: 押された物理キーをそのまま出す（割付が無いときと同じ）。

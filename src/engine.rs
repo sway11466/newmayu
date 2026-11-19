@@ -149,6 +149,8 @@ pub struct Engine {
     current: KeymapId,
     /// `&Prefix` を受けて次の 1 キーを待っている。
     is_prefix: bool,
+    /// 待っているあいだ修飾キーを真のモディファイヤにする（yamy の `m_doesIgnoreModifierForPrefix`）。
+    ignore_mods_for_prefix: bool,
     /// 物理的に押されているキー。
     pressed: HashSet<Key>,
     /// 押したときに出した動作列（離しで使う）。
@@ -183,6 +185,7 @@ impl Engine {
             focus_is_console: false,
             current,
             is_prefix: false,
+            ignore_mods_for_prefix: false,
             variable: 0,
             pending: None,
             one_shot: None,
@@ -286,17 +289,17 @@ impl Engine {
             event_mods = event_mods.dontcare(m);
         }
 
-        if own_mod.is_some_and(|m| keymap.is_one_shot(m, key)) {
+        if own_mod.is_some() && self.is_prefix && self.ignore_mods_for_prefix {
+            // 真のモディファイヤ（yamy の AM_true）: 押されたことだけ覚え、OS へは何も出さない
+        } else if own_mod.is_some_and(|m| keymap.is_one_shot(m, key)) {
             // `!!` の修飾キー（yamy の AM_oneShot）: 押しでは何も出さない。他のキーを押さずに離したら、
-            // 押したときの修飾でこのキーを押して離す。&Prefix の後は yamy と同じく何も出さない
-            if !self.is_prefix {
-                match edge {
-                    Edge::Down => self.one_shot = Some((state, event_mods)),
-                    Edge::Up => {
-                        if let Some((state, event_mods)) = self.one_shot.take() {
-                            self.begin_generating(os, key, Edge::Down, state, event_mods, false);
-                            self.begin_generating(os, key, Edge::Up, state, event_mods, false);
-                        }
+            // 押したときの修飾でこのキーを押して離す
+            match edge {
+                Edge::Down => self.one_shot = Some((state, event_mods)),
+                Edge::Up => {
+                    if let Some((state, event_mods)) = self.one_shot.take() {
+                        self.begin_generating(os, key, Edge::Down, state, event_mods, false);
+                        self.begin_generating(os, key, Edge::Up, state, event_mods, false);
                     }
                 }
             }
@@ -552,10 +555,11 @@ impl Engine {
                     Edge::Up => self.release(os, *key),
                 }
             }
-            Action::Prefix(target) => {
+            Action::Prefix(target, ignore_modifiers) => {
                 if edge == Edge::Down {
                     self.current = *target;
                     self.is_prefix = true;
+                    self.ignore_mods_for_prefix = *ignore_modifiers;
                     self.generate_event(os, EventKind::Prefixed, *target, cur, depth + 1);
                 }
             }
@@ -1281,6 +1285,54 @@ mod tests {
         );
     }
 
+    /// `C-X` で Sub へ。Sub では C-F が H。プレフィックス中に R_CONTROL を押して F を押す
+    fn prefix_then_control_f(ignore_modifiers: bool) -> Vec<Vec<Output>> {
+        let (config, mut global) = base();
+        let sub = KeymapId(1);
+        let ctrl = ModSpec::none().with(BasicMod::Control);
+        let (both, any) = (EdgeSpec::Both, LockSpec::any());
+        global.assign(
+            X,
+            ctrl,
+            both,
+            any,
+            vec![Action::Prefix(sub, ignore_modifiers)],
+        );
+        let mut sub_km = Keymap::new("Sub", Some(GLOBAL));
+        sub_km.add_mod_key(BasicMod::Control, L_CONTROL);
+        sub_km.add_mod_key(BasicMod::Control, R_CONTROL);
+        sub_km.assign(F, ctrl, both, any, vec![Action::key(H)]);
+        let mut e = engine(config, vec![global, sub_km]);
+        [
+            Input::down(L_CONTROL),
+            Input::down(X),
+            Input::up(X),
+            Input::down(R_CONTROL),
+            Input::up(L_CONTROL),
+            Input::down(F),
+        ]
+        .into_iter()
+        .map(|i| feed(&mut e, i))
+        .collect()
+    }
+
+    #[test]
+    fn modifier_in_prefix_is_true_modifier() {
+        let out = prefix_then_control_f(true);
+        // R_CONTROL の押しも L_CONTROL の離しも OS へ出さない。C-F は Sub で引かれる
+        assert_eq!(out[3], vec![]);
+        assert_eq!(out[4], vec![]);
+        assert_eq!(out[5], vec![Output::Release(L_CONTROL), Output::Press(H)]);
+    }
+
+    #[test]
+    fn modifier_in_prefix_is_sent_without_ignore_modifiers() {
+        let out = prefix_then_control_f(false);
+        assert_eq!(out[3], vec![Output::Press(R_CONTROL)]);
+        assert_eq!(out[4], vec![Output::Release(L_CONTROL)]);
+        assert_eq!(out[5], vec![Output::Release(R_CONTROL), Output::Press(H)]);
+    }
+
     #[test]
     fn prefix_switches_keymap_for_next_key() {
         let (config, mut global) = base();
@@ -1291,7 +1343,7 @@ mod tests {
             ModSpec::none().with(BasicMod::Control),
             EdgeSpec::Both,
             LockSpec::any(),
-            vec![Action::Prefix(cx)],
+            vec![Action::Prefix(cx, true)],
         );
         // keymap EmacsC-X : Global: key F = Right
         let mut emacs_cx = Keymap::new("EmacsC-X", Some(GLOBAL));
@@ -1697,7 +1749,7 @@ mod tests {
         global.set_event(EventKind::BeforeKeyDown, vec![Action::key(X)]);
         global.set_event(EventKind::AfterKeyUp, vec![Action::key(H)]);
         // key A = &Prefix(Sub)
-        global.assign(A, none, both, any, vec![Action::Prefix(sub)]);
+        global.assign(A, none, both, any, vec![Action::Prefix(sub, true)]);
         let mut subk = Keymap::new("Sub", Some(GLOBAL));
         subk.set_event(EventKind::Prefixed, vec![Action::key(F)]);
         // keymap Sub: key B = Right
@@ -1734,7 +1786,7 @@ mod tests {
         let (none, both, any) = (ModSpec::none(), EdgeSpec::Both, LockSpec::any());
         let sub = KeymapId(1);
         // key A = &Prefix(Sub)   key B = X
-        global.assign(A, none, both, any, vec![Action::Prefix(sub)]);
+        global.assign(A, none, both, any, vec![Action::Prefix(sub, true)]);
         global.assign(B, none, both, any, vec![Action::key(X)]);
         // keymap Sub: key B = &KeymapWindow   key H = F
         let mut subk = Keymap::new("Sub", None);
@@ -1935,7 +1987,7 @@ mod tests {
             ModSpec::none(),
             EdgeSpec::Both,
             any,
-            vec![Action::Prefix(kd)],
+            vec![Action::Prefix(kd, true)],
         );
         let mut keymap_default = Keymap::new("KeymapDefault", None);
         keymap_default.default_actions = vec![Action::Default];
@@ -1967,7 +2019,7 @@ mod tests {
             ModSpec::none(),
             EdgeSpec::Both,
             LockSpec::any(),
-            vec![Action::Prefix(child)],
+            vec![Action::Prefix(child, true)],
         );
         let mut c = Keymap::new("Child", Some(GLOBAL));
         c.add_mod_key(BasicMod::Control, L_CONTROL);

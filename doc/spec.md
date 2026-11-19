@@ -85,7 +85,7 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | `&KeymapPrevPrefix([N])` | `&Prefix` で来る前のキーマップ（N 段前）で引き直す | × | |
 | `&OtherWindowClass` | いまの窓に一致する次の window キーマップで引き直す。無ければ `&Default` | ○ | |
 | `&Keymap(名前)` | 指定のキーマップで引き直す | ○ | |
-| `&Prefix(名前 [, ignore_modifiers])` | 次のキーを指定のキーマップで解釈する（2 ストローク）。ignore_modifiers（既定 true）なら遷移先では全モディファイヤを真のモディファイヤ扱い | △ | 第 2 引数は未対応 |
+| `&Prefix(名前 [, ignore_modifiers])` | 次のキーを指定のキーマップで解釈する（2 ストローク）。ignore_modifiers（既定 true）なら遷移先では全モディファイヤを真のモディファイヤ扱い | ○ | |
 | `&CancelPrefix` | yamy 固有。プレフィックス状態を解除する | × | |
 | `&Sync` | 出したキーがフォーカス窓で処理されるまで待つ（最長 5 秒）。コンソール窓では待たない | ○ | |
 | `&Toggle(LockN [, on\|off])` | ロック L0〜L9 を切り替える / 強制する | × | |

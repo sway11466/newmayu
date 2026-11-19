@@ -1443,7 +1443,7 @@ impl Loader {
                     if !fname.eq_ignore_ascii_case("Prefix") {
                         return self.err(format!("`&{fname}` は未対応"));
                     }
-                    out.push(Action::Prefix(self.load_keymap_arg(cur, "Prefix")?));
+                    out.push(self.load_prefix(cur)?);
                 }
                 t => {
                     let key = self.key_by_name(t)?;
@@ -1476,6 +1476,33 @@ impl Loader {
         };
         self.expect_sym(cur, ")")?;
         Ok(KeymapId(idx))
+    }
+
+    /// `&Prefix(キーマップ [, ignore_modifiers])`。ignore_modifiers の既定は true（yamy と同じ）。
+    fn load_prefix(&self, cur: &mut Cur) -> Result<Action> {
+        self.expect_sym(cur, "(")?;
+        let Some(t) = cur.next() else {
+            return self.err("&Prefix( の後はキーマップ名");
+        };
+        let kname = self.name_of(t)?;
+        let Some(&idx) = self.keymap_names.get(&lower(&kname)) else {
+            return self.err(format!("キーマップ `{kname}` は未定義"));
+        };
+        let mut ignore_modifiers = true;
+        if cur.peek_sym(",") {
+            cur.next();
+            let Some(t) = cur.next() else {
+                return self.err("`&Prefix`: 2 番目の引数は true か false");
+            };
+            let name = self.name_of(t)?;
+            ignore_modifiers = match lower(&name).as_str() {
+                "true" => true,
+                "false" => false,
+                _ => return self.err(format!("`&Prefix`: `{name}` は true か false")),
+            };
+        }
+        self.expect_sym(cur, ")")?;
+        Ok(Action::Prefix(KeymapId(idx), ignore_modifiers))
     }
 
     fn load_func(&self, fname: &str, cur: &mut Cur) -> Result<Option<Func>> {
@@ -2045,7 +2072,7 @@ mod tests {
                 in_keyseq(EISUU, base().with(BasicMod::Shift)),
                 Action::key_with(B, base()),
                 Action::key_with(H, base()),
-                Action::Prefix(sub_id),
+                Action::Prefix(sub_id, true),
             ]
         );
         let cb = only(main, B);
@@ -2699,6 +2726,37 @@ keymap Sub : Global"
     }
 
     #[test]
+    fn prefix_ignore_modifiers() {
+        let c = load_ok(
+            "keymap Sub
+             key A = &Prefix(Sub, False)
+             key B = &Prefix(Sub, true)
+             key H = &Prefix(Sub)",
+        );
+        let sub = &c.keymaps[1];
+        assert_eq!(
+            only(sub, A).actions,
+            vec![Action::Prefix(KeymapId(1), false)]
+        );
+        assert_eq!(
+            only(sub, B).actions,
+            vec![Action::Prefix(KeymapId(1), true)]
+        );
+        assert_eq!(
+            only(sub, H).actions,
+            vec![Action::Prefix(KeymapId(1), true)]
+        );
+        assert!(
+            load_err(
+                "keymap Sub
+key A = &Prefix(Sub, yes)"
+            )
+            .to_string()
+            .contains("true か false")
+        );
+    }
+
+    #[test]
     fn event_variable_and_repeat() {
         let c = load_ok(
             "keyseq $seq = Space
@@ -2724,7 +2782,7 @@ keymap Sub : Global"
             only(sub, A).actions,
             vec![
                 Action::Variable { mag: 10, inc: 3 },
-                Action::Prefix(KeymapId(1))
+                Action::Prefix(KeymapId(1), true)
             ]
         );
         assert_eq!(
