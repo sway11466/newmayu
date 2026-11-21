@@ -51,7 +51,7 @@ yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMI
 | `L0-`〜`L9-` | mayu 内部だけのロック。`&Toggle(Lock0)` で切り替える | × | `&Toggle` も未対応 |
 | `NL-` `CL-` `SL-` `KL-` | NumLock / CapsLock / ScrollLock / カナロック | ○ | |
 | `IL-` | IME がオン | ○ | |
-| `IC-` / `I-` | IME で変換中 | △ | IMM32 のアプリでは取れる。TSF だけのアプリは feature-7 |
+| `IC-` / `I-` | IME で変換中。変換の開始・終了の窓メッセージ（`WM_IME_STARTCOMPOSITION` / `WM_IME_ENDCOMPOSITION`）で取るので、TSF だけで IME を使うアプリでは取れない | ○ | TSF だけのアプリでも取る（yamy と異なる） |
 | `MAX-` `MIN-` | 窓が最大化 / 最小化されている | × | |
 | `MMAX-` `MMIN-` | MDI 子窓が最大化 / 最小化されている | × | |
 | `T-` `TS-` | タッチパッドに指が触れている（TS- は全キーを離すまで続く） | × | |

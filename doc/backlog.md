@@ -18,14 +18,6 @@
 
 実装済みコードに足す機能。採番は本書冒頭「index」。各エントリは 背景／ゴール／対応／該当 で記す。
 
-### feature-7
-
-**TSF のアプリで変換中を取る**
-- ゴール：ストア版メモ帳のような TSF だけで IME を使うアプリでも、`IC-`（変換中）修飾が yamy と同じく効く。
-- 背景：変換中はフック DLL が `WM_IME_STARTCOMPOSITION` / `WM_IME_ENDCOMPOSITION` を見て取っている。IMM32 のアプリ（Win+R の入力欄）では取れたが、TSF のアプリにはこのメッセージが来ない。IME のオン・オフは取れている。
-- 対応：TSF の `ITfThreadMgr` / `ITfContext` の状態を DLL の中から読む、または `ITfUIElementSink` 系の通知を受ける方法を調べ、取れる方法で DLL に足す。
-- 該当：`hook/src/lib.rs`・`ipc/src/lib.rs`。
-
 ### feature-15
 
 **ブラウザの入力欄での &Recenter**

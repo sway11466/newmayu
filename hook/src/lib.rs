@@ -6,6 +6,8 @@
 //! 本体のメールスロットに通知を書く。同期キーのスキャンコードは本体が共有メモリ
 //! （`SYNC_SHARE_NAME`）に置き、最初のキー離しで読む。フォーカスの通知には、フォーカス窓から親をたどったクラス名の列
 //! （`exe名:クラス:…:クラス`）とタイトルの列を載せる（yamy の `getClassNameTitleName`）。
+//! 変換中は `WM_IME_STARTCOMPOSITION` / `WM_IME_ENDCOMPOSITION` で取る（yamy と同じ）ほか、TSF だけで
+//! IME を使うアプリのために、`WH_GETMESSAGE` のたびにそのスレッドの TSF に変換があるかを見る（yamy に無い）。
 //! 本体からの命令（`&Recenter`・`&WindowIdentify`）は登録メッセージで届き、`WH_GETMESSAGE` で受ける。
 //! `&InvestigateCommand` の間（共有メモリで知る）は、窓に届いた `WM_COMMAND` / `WM_SYSCOMMAND` を知らせる。
 //!
@@ -14,7 +16,8 @@
 //! - panic は FFI の境界を越えさせない（境界の関数は値を返すだけ）
 //! - メールスロットは最初に書くときに開き、失敗したら次の機会にまた開く
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicUsize, Ordering};
 
 use newmayu_ipc::{
     CAPS_LOCK, COMMAND_MESSAGE_NAME, COMMAND_NOTIFY_NAME, COMMAND_RECENTER, Header, IME_COMPOSING,
@@ -29,7 +32,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, OPEN_EXISTING, WriteFile,
 };
-use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
+use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Memory::{FILE_MAP_READ, MapViewOfFile, OpenFileMappingW};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Controls::RichEdit::EM_EXLINEFROMCHAR;
@@ -40,15 +43,17 @@ use windows::Win32::UI::Input::Ime::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, VK_CAPITAL, VK_KANA, VK_NUMLOCK, VK_SCROLL,
 };
+use windows::Win32::UI::TextServices::{ITfContextComposition, ITfThreadMgr};
 use windows::Win32::UI::WindowsAndMessaging::{
     CWPSTRUCT, CallNextHookEx, ES_MULTILINE, GWL_STYLE, GetClassNameW, GetClientRect, GetParent,
-    GetWindowLongW, GetWindowTextW, HHOOK, MSG, PM_REMOVE, RegisterWindowMessageW, SendMessageW,
-    SetWindowsHookExW, UnhookWindowsHookEx, WA_INACTIVE, WH_CALLWNDPROC, WH_GETMESSAGE,
-    WM_ACTIVATE, WM_ACTIVATEAPP, WM_COMMAND, WM_ENTERMENULOOP, WM_EXITMENULOOP,
-    WM_IME_ENDCOMPOSITION, WM_IME_NOTIFY, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
-    WM_MOUSEACTIVATE, WM_NCACTIVATE, WM_SETFOCUS, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId, HHOOK, MSG, PM_REMOVE,
+    RegisterWindowMessageW, SendMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WA_INACTIVE,
+    WH_CALLWNDPROC, WH_GETMESSAGE, WM_ACTIVATE, WM_ACTIVATEAPP, WM_COMMAND, WM_ENTERMENULOOP,
+    WM_EXITMENULOOP, WM_IME_ENDCOMPOSITION, WM_IME_NOTIFY, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
+    WM_KEYUP, WM_MOUSEACTIVATE, WM_NCACTIVATE, WM_SETFOCUS, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    WM_SYSKEYUP,
 };
-use windows::core::PCWSTR;
+use windows::core::{HRESULT, Interface, PCSTR, PCWSTR, w};
 
 /// この DLL のモジュールハンドル。`SetWindowsHookExW` に渡す。
 static MODULE: AtomicIsize = AtomicIsize::new(0);
@@ -62,6 +67,10 @@ static MAILSLOT: AtomicIsize = AtomicIsize::new(0);
 static IME_OPEN_STATE: AtomicBool = AtomicBool::new(false);
 static IME_COMPOSING_STATE: AtomicBool = AtomicBool::new(false);
 static IME_KNOWN: AtomicBool = AtomicBool::new(false);
+/// TSF で前に見た変換の有無。これが変わったときだけ `IME_COMPOSING_STATE` を書き換えて通知する。
+static TSF_COMPOSING: AtomicBool = AtomicBool::new(false);
+/// msctf.dll の `TF_GetThreadMgr` の番地。0 = まだ見つけていない。
+static TF_GET_THREAD_MGR: AtomicUsize = AtomicUsize::new(0);
 /// デバッグ用: 送れなかった回数。
 static SEND_FAILURES: AtomicU32 = AtomicU32::new(0);
 /// このプロセスで最後に通知したフォーカス窓。
@@ -127,6 +136,7 @@ unsafe extern "system" fn get_message_proc(code: i32, wparam: WPARAM, lparam: LP
         // SAFETY: WH_GETMESSAGE では lparam は MSG を指す。
         let msg = unsafe { &*(lparam.0 as *const MSG) };
         on_message(msg.hwnd, msg.message, msg.wParam, msg.lParam, 0);
+        refresh_tsf_composition(msg.hwnd, 30);
         if msg.message == command_message() {
             match msg.wParam.0 {
                 COMMAND_RECENTER => recenter(msg.hwnd),
@@ -398,6 +408,69 @@ fn append_utf16(
         at += s.len();
     }
     at
+}
+
+/// このスレッドの TSF に変換があるかを見て、前と変わっていれば通知する。
+/// TSF を使っていないスレッドでは何もしない（`WM_IME_*COMPOSITION` だけで取る）。
+/// 見るのはフォーカス窓を持つスレッドだけ。メモ帳のように窓ごとにスレッドが分かれていると、
+/// 変換の無いスレッドの結果で上書きしてしまうため。
+fn refresh_tsf_composition(hwnd: HWND, cause: u32) {
+    // SAFETY: 入力状態を読むだけ。
+    let focus = unsafe { GetFocus() };
+    // SAFETY: 同上。窓が無ければ 0 が返る。
+    if focus.0.is_null()
+        || unsafe { GetWindowThreadProcessId(focus, None) } != unsafe { GetCurrentThreadId() }
+    {
+        return;
+    }
+    let Some(composing) = tsf_composing() else {
+        return;
+    };
+    if TSF_COMPOSING.swap(composing, Ordering::Relaxed) != composing {
+        IME_COMPOSING_STATE.store(composing, Ordering::Relaxed);
+        notify_ime(hwnd, cause);
+    }
+}
+
+/// フォーカスのある文書の一番上のコンテキストに変換が 1 つでもあるか。
+/// スレッドに TSF のスレッドマネージャが無ければ `None`。
+fn tsf_composing() -> Option<bool> {
+    type GetThreadMgr = unsafe extern "system" fn(*mut *mut c_void) -> HRESULT;
+    let mut addr = TF_GET_THREAD_MGR.load(Ordering::Relaxed);
+    if addr == 0 {
+        // msctf.dll が読み込まれていなければ、このプロセスは TSF を使っていない。こちらからは読み込まない
+        // SAFETY: 読み込み済みのモジュールを名前で探すだけ。
+        let module = unsafe { GetModuleHandleW(w!("msctf.dll")) }.ok()?;
+        // SAFETY: 同上のモジュールから関数の番地を探すだけ。
+        let proc = unsafe { GetProcAddress(module, PCSTR(c"TF_GetThreadMgr".as_ptr().cast())) }?;
+        addr = proc as usize;
+        TF_GET_THREAD_MGR.store(addr, Ordering::Relaxed);
+    }
+    // SAFETY: msctf.dll の TF_GetThreadMgr の番地で、型はドキュメントどおり。
+    let get: GetThreadMgr = unsafe { std::mem::transmute::<usize, GetThreadMgr>(addr) };
+    let mut raw = std::ptr::null_mut();
+    // SAFETY: 出力先を渡すだけ。スレッドに無ければ null が入る。
+    unsafe { get(&mut raw) }.ok().ok()?;
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: TF_GetThreadMgr は参照を 1 つ足した ITfThreadMgr を返す。その参照をここで引き取る。
+    let thread_mgr = unsafe { ITfThreadMgr::from_raw(raw) };
+    Some(context_has_composition(&thread_mgr).unwrap_or(false))
+}
+
+fn context_has_composition(thread_mgr: &ITfThreadMgr) -> windows::core::Result<bool> {
+    // SAFETY: どれもこのスレッドの TSF のオブジェクトを読むだけ。
+    unsafe {
+        let context = thread_mgr.GetFocus()?.GetTop()?;
+        let compositions = context
+            .cast::<ITfContextComposition>()?
+            .EnumCompositions()?;
+        let mut first = [None];
+        let mut fetched = 0;
+        compositions.Next(&mut first, &mut fetched)?;
+        Ok(fetched > 0)
+    }
 }
 
 /// IME がオンかを問い直し、変わっていれば（`force` なら必ず）通知する。
