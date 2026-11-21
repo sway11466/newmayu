@@ -148,6 +148,11 @@ impl SyncShare {
         }
         let s = SyncShare { handle, view };
         s.set(key);
+        // 前に動いた newmayu の値が残っていることがある（ほかのアプリに残ったフック DLL が
+        // 共有メモリを開いたままだと消えない）。yamy と同じく、記録しない状態から始める
+        let p = (s.view.Value as *mut u8).wrapping_add(NOTIFY_COMMAND_OFFSET) as *mut u32;
+        // SAFETY: view は SYNC_SHARE_SIZE バイトの書ける領域。p はその中の u32 にそろった位置。
+        unsafe { p.write_volatile(0) };
         Ok(s)
     }
 
