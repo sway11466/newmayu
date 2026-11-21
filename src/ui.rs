@@ -22,8 +22,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, IDI_APPLICATION, LoadIconW,
     MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW,
     RegisterWindowMessageW, SetForegroundWindow, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_NONOTIFY,
-    TPM_RETURNCMD, TrackPopupMenu, WINDOW_EX_STYLE, WM_APP, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
-    WNDCLASSW, WS_OVERLAPPED,
+    TPM_RETURNCMD, TrackPopupMenu, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_LBUTTONUP, WM_NULL,
+    WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::{BOOL, HSTRING, w};
 
@@ -300,6 +300,11 @@ unsafe extern "system" fn wnd_proc(
         }
         if msg == WM_RELOAD {
             (state.handler)(Command::Reload);
+            return LRESULT(0);
+        }
+        if msg == WM_CLOSE {
+            // インストーラーが更新の前に送ってくる。トレイの「終了」と同じく終わる
+            (state.handler)(Command::Exit);
             return LRESULT(0);
         }
         if msg == state.taskbar_created {

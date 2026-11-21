@@ -30,3 +30,4 @@ newmayu — キーカスタマイズソフト mayu/yamy を Rust で作り直す
 - [doc/spec.md](doc/spec.md) — 外部仕様（.mayu の構文と &関数。各行に newmayu の対応）
 - [doc/test.md](doc/test.md) — テスト方針（目的・TDD・互換のテスト・テストサイズ・テストしやすい設計・運用）
 - [doc/backlog.md](doc/backlog.md) — 未完了の作業（バグ・機能追加・リファクタリング）
+- [doc/release.md](doc/release.md) — 配布（インストーラー・zip・ライセンス・中身）

@@ -41,6 +41,7 @@
 - 案内の窓（&HelpMessage / &HelpVariable）：出たとき、ピンを押したときに、フォーカス窓からフォーカスを奪わない。
 - &WindowIdentify / &LoadSetting：コンソールで default.mayu の C-S-D を押しても、CLASS・TITLE・位置と大きさがログに出る。`&LoadSetting("名前")` でその名前の設定に切り替わり、一覧に無い名前ならログに `unknown setting name` が出る。
 - &DescribeBindings：Word で C-S-/ を押すと、ログに Word のキーマップから Global までの割付が yamy と同じ形で並ぶ。
+- インストーラーでのフック DLL の入れ替え：`newmayu_hook.dll` が変わった版を、newmayu を動かしたまま入れても、再起動を求められずに入り、起動し直した newmayu で新しい DLL が使われる。
 - ログダイアログ：トレイの「ログ」で出て、起動時の見出しと設定の読み込みのログが並ぶ。「詳細」を付けるとキー変換・フォーカスの行も出る。「ログのクリア」で消えて見出しが出直す。「フォントの変更」でログの文字がすぐ変わり、`yamy.ini` の `logFont` に書かれる。「閉じる」で隠れる。default.mayu などの `&MayuDialog(Log, …)` / `&LogClear` も同じく効く。再読込に失敗するとログダイアログが出る。
 
 ## parking lot

@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  newmayu のインストーラー（WiX v7）。作り方は doc/release.md。
+  変数: Version（Cargo.toml の版）、BinDir（newmayu.exe と newmayu_hook.dll のあるフォルダ）
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="newmayu"
+           Manufacturer="sway"
+           Version="$(var.Version)"
+           UpgradeCode="DC182E49-51E3-45C1-B230-17362E88EF00"
+           Language="1041"
+           Codepage="932"
+           Scope="perUserOrMachine">
+    <!-- 使用中のフック DLL が残っていても、再起動は求めない -->
+    <Property Id="REBOOT" Value="ReallySuppress" />
+
+    <!-- 同じ版の作り直しでも入れ替える（ドッグフーディング用）。
+         新しい版を入れてから古い版を消す。先に消すと、使用中のフック DLL の消去が
+         再起動時に回り、同じ名前で入れた新しい DLL まで消えてしまうため -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  Schedule="afterInstallExecute"
+                  DowngradeErrorMessage="新しい版の newmayu が入っています。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- 入れ替え・アンインストールの前に、動いている newmayu を終わらせる。
+         トレイの窓への WM_CLOSE で終わる。終わらなければ強制終了する -->
+    <util:CloseApplication Id="CloseNewmayu"
+                           Target="newmayu.exe"
+                           CloseMessage="yes"
+                           Timeout="10"
+                           RebootPrompt="no"
+                           TerminateProcess="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="newmayu" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="Files" Directory="INSTALLFOLDER">
+      <Component>
+        <File Id="newmayu.exe" Source="$(var.BinDir)\newmayu.exe" KeyPath="yes" />
+      </Component>
+      <Component>
+        <File Source="$(var.BinDir)\newmayu_hook.dll" />
+      </Component>
+      <Component><File Source="dist\104.mayu" /></Component>
+      <Component><File Source="dist\104on109.mayu" /></Component>
+      <Component><File Source="dist\109.mayu" /></Component>
+      <Component><File Source="dist\109on104.mayu" /></Component>
+      <Component><File Source="dist\default.mayu" /></Component>
+      <Component><File Source="dist\dot.mayu" /></Component>
+      <Component><File Source="dist\emacsedit.mayu" /></Component>
+      <Component><File Source="dist\workaround.mayu" /></Component>
+      <Component><File Source="dist\workaround.reg" /></Component>
+      <Component><File Source="dist\readme.txt" /></Component>
+      <Component><File Source="LICENSE" /></Component>
+      <!-- 設定の一覧は利用者が書き換える。残っていれば上書きせず、アンインストールでも消さない -->
+      <Component NeverOverwrite="yes" Permanent="yes">
+        <File Source="dist\yamy.ini" />
+      </Component>
+      <!-- ログオン時に起動する -->
+      <Component>
+        <RegistryValue Root="HKMU"
+                       Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                       Name="newmayu"
+                       Type="string"
+                       Value="&quot;[#newmayu.exe]&quot;"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="StartMenu"
+                  Name="newmayu"
+                  Target="[#newmayu.exe]"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKMU"
+                       Key="Software\newmayu"
+                       Name="StartMenuShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="Files" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <!-- 入れ終わったら起動する（アンインストールのときは起動しない） -->
+    <CustomAction Id="LaunchNewmayu"
+                  FileRef="newmayu.exe"
+                  ExeCommand=""
+                  Execute="immediate"
+                  Return="asyncNoWait" />
+    <InstallExecuteSequence>
+      <!-- アンインストールでもファイルを消す前に終わらせる（既定はファイルを入れる直前） -->
+      <Custom Action="override Wix4CloseApplications_X64" Before="RemoveFiles" />
+      <Custom Action="LaunchNewmayu" After="InstallFinalize" Condition="NOT REMOVE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>
