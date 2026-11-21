@@ -161,6 +161,8 @@ pub struct Engine {
     locks: LockState,
     /// OS に押したと伝えてまだ離していないキー。
     win32_pressed: HashSet<Key>,
+    /// 最後に OS へ出したキー。押しならそのキー、離しなら None（yamy の `m_lastGeneratedKey`）。
+    last_generated: Option<Key>,
     /// `&Variable` が変え、`&Repeat` が回数に使う値（yamy の `m_variable`）。
     variable: i32,
     /// 複数スキャンコードのキーの組み立て途中（yamy の `keyboardHandler` の `key`）。
@@ -198,6 +200,7 @@ impl Engine {
             held: HashMap::new(),
             locks: LockState::empty(),
             win32_pressed: HashSet::new(),
+            last_generated: None,
         }
     }
 
@@ -336,6 +339,7 @@ impl Engine {
         rest.sort();
         for k in rest {
             os.output(Output::Release(k));
+            self.last_generated = None;
         }
         self.one_shot = None;
     }
@@ -796,6 +800,19 @@ impl Engine {
                     self.press(os, *first);
                 }
             } else {
+                // 「Alt 押し・Alt 離し」「Windows 押し・Windows 離し」だけにならないよう、間に Shift
+                // （無ければ Control）を押して離す。メニューやスタートが開かないように（yamy と同じ）
+                if matches!(m, BasicMod::Alt | BasicMod::Windows)
+                    && self.last_generated.is_some_and(|k| keys.contains(&k))
+                {
+                    let shift = &self.config.def_mods[BasicMod::Shift.index()];
+                    let control = &self.config.def_mods[BasicMod::Control.index()];
+                    let dummy = shift.first().or(control.first()).copied();
+                    if let Some(d) = dummy {
+                        self.press(os, d);
+                        self.release(os, d);
+                    }
+                }
                 for k in keys {
                     if self.win32_pressed.contains(&k) {
                         self.release(os, k);
@@ -809,12 +826,14 @@ impl Engine {
     fn press(&mut self, os: &mut dyn Os, key: Key) {
         self.win32_pressed.insert(key);
         os.output(Output::Press(key));
+        self.last_generated = Some(key);
     }
 
     /// 離しは OS 側で押されているときだけ出す。
     fn release(&mut self, os: &mut dyn Os, key: Key) {
         if self.win32_pressed.remove(&key) {
             os.output(Output::Release(key));
+            self.last_generated = None;
         }
     }
 }
@@ -1366,6 +1385,59 @@ mod tests {
         let alt = ModSpec::none().with(BasicMod::Alt);
         esc_km.assign(X, alt, both, any, vec![Action::key(H)]);
         engine(config, vec![global, esc_km])
+    }
+
+    /// `key A-X = ~A-H`。Alt は L_ALT、Shift は L_SHIFT
+    fn alt_x_to_h() -> Engine {
+        const L_ALT: Key = Key::plain(0x38);
+        const L_SHIFT: Key = Key::plain(0x2a);
+        let (mut config, mut global) = base();
+        config.keys.extend([L_ALT, L_SHIFT]);
+        config.def_mod(BasicMod::Alt, [L_ALT]);
+        config.def_mod(BasicMod::Shift, [L_SHIFT]);
+        global.add_mod_key(BasicMod::Alt, L_ALT);
+        global.add_mod_key(BasicMod::Shift, L_SHIFT);
+        let alt = ModSpec::none().with(BasicMod::Alt);
+        let no_alt = ModSpec::any().without(BasicMod::Alt);
+        global.assign(
+            X,
+            alt,
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::key_with(H, no_alt)],
+        );
+        engine(config, vec![global])
+    }
+
+    #[test]
+    fn releasing_alt_just_pressed_inserts_shift() {
+        const L_ALT: Key = Key::plain(0x38);
+        const L_SHIFT: Key = Key::plain(0x2a);
+        let mut e = alt_x_to_h();
+        assert_eq!(feed(&mut e, Input::down(L_ALT)), vec![Output::Press(L_ALT)]);
+        // 最後に出したのが Alt の押しなので、Alt を離す前に Shift を押して離す
+        assert_eq!(
+            feed(&mut e, Input::down(X)),
+            vec![
+                Output::Press(L_SHIFT),
+                Output::Release(L_SHIFT),
+                Output::Release(L_ALT),
+                Output::Press(H)
+            ]
+        );
+    }
+
+    #[test]
+    fn releasing_alt_after_another_key_does_not_insert_shift() {
+        const L_ALT: Key = Key::plain(0x38);
+        let mut e = alt_x_to_h();
+        feed(&mut e, Input::down(L_ALT));
+        feed(&mut e, Input::down(F));
+        feed(&mut e, Input::up(F));
+        assert_eq!(
+            feed(&mut e, Input::down(X)),
+            vec![Output::Release(L_ALT), Output::Press(H)]
+        );
     }
 
     #[test]
