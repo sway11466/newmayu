@@ -33,7 +33,7 @@ yamy と同じセット。
 
 ## 作り方
 
-`powershell -ExecutionPolicy Bypass -File wix\package.ps1` で、リリースビルドから `target\dist` に `newmayu-<版>-x64.msi` と `newmayu-<版>-x64.zip` を作る。版は `Cargo.toml` の `version`。
+`powershell -ExecutionPolicy Bypass -File installer\package.ps1` で、リリースビルドから `target\dist` に `newmayu-<版>-x64.msi` と `newmayu-<版>-x64.zip` を作る。版は `crates\newmayu\Cargo.toml` の `version`。
 
-- インストーラーの中身は `wix\main.wxs`。yamy から持ってきた同梱のファイルと readme は `dist\`。
+- インストーラーの中身は `installer\main.wxs`。yamy から持ってきた同梱のファイルと readme は `installer\files\`。
 - zip は `newmayu-<版>-x64` フォルダに、インストーラーと同じファイルを入れる。

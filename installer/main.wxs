@@ -43,20 +43,20 @@
       <Component>
         <File Source="$(var.BinDir)\newmayu_hook.dll" />
       </Component>
-      <Component><File Source="dist\104.mayu" /></Component>
-      <Component><File Source="dist\104on109.mayu" /></Component>
-      <Component><File Source="dist\109.mayu" /></Component>
-      <Component><File Source="dist\109on104.mayu" /></Component>
-      <Component><File Source="dist\default.mayu" /></Component>
-      <Component><File Source="dist\dot.mayu" /></Component>
-      <Component><File Source="dist\emacsedit.mayu" /></Component>
-      <Component><File Source="dist\workaround.mayu" /></Component>
-      <Component><File Source="dist\workaround.reg" /></Component>
-      <Component><File Source="dist\readme.txt" /></Component>
+      <Component><File Source="installer\files\104.mayu" /></Component>
+      <Component><File Source="installer\files\104on109.mayu" /></Component>
+      <Component><File Source="installer\files\109.mayu" /></Component>
+      <Component><File Source="installer\files\109on104.mayu" /></Component>
+      <Component><File Source="installer\files\default.mayu" /></Component>
+      <Component><File Source="installer\files\dot.mayu" /></Component>
+      <Component><File Source="installer\files\emacsedit.mayu" /></Component>
+      <Component><File Source="installer\files\workaround.mayu" /></Component>
+      <Component><File Source="installer\files\workaround.reg" /></Component>
+      <Component><File Source="installer\files\readme.txt" /></Component>
       <Component><File Source="LICENSE" /></Component>
       <!-- 設定の一覧は利用者が書き換える。残っていれば上書きせず、アンインストールでも消さない -->
       <Component NeverOverwrite="yes" Permanent="yes">
-        <File Source="dist\yamy.ini" />
+        <File Source="installer\files\yamy.ini" />
       </Component>
       <!-- ログオン時に起動する -->
       <Component>

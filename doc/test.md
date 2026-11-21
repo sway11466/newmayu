@@ -35,7 +35,7 @@ newmayu での置き場所:
 
 | 対象 | サイズ | 実行 |
 |---|---|---|
-| 字句解析・構文解析（`src/config/`）、エンジンの判断（`src/engine.rs` の入力 → 出力） | Small | `cargo test` |
+| 字句解析・構文解析（`crates/newmayu/src/config/`）、エンジンの判断（`crates/newmayu/src/engine.rs` の入力 → 出力） | Small | `cargo test` |
 | `.mayu` ファイルを読ませる確認 | Medium | `cargo test` |
 | 実機テスト `selftest`（フック → エンジン → `SendInput` の通し） | Medium | 手元で `cargo run --bin selftest` |
 
