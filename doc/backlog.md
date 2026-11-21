@@ -4,7 +4,7 @@
 
 ## index
 
-次回採番: bug=3 / feature=20 / refactoring=1.
+次回採番: bug=3 / feature=22 / refactoring=1.
 
 項目（バグ bug / 機能追加 feature / リファクタリング refactoring）を追加するときは、該当カテゴリの採番を +1 して ID を継ぐ。完了した項目は本書から削除し、番号は再利用しない（過去の使用済み番号は `git log -p -- doc/backlog.md | grep -oE '(bug|feature|refactoring)-[0-9]+' | sort -u` で確認できる）。状態は「本書に載っていれば未完了／消えていれば完了」で表す（状態列は持たない）。ゴールは、その作業で何が達成されていれば終わりなのかを1文で書く。手段ではなく到達点を書く。
 
@@ -24,6 +24,22 @@
 - ゴール：ブラウザの複数行の入力欄でも、C-L でキャレット行が画面の中央に来る。
 - 背景：yamy の `&Recenter` はクラス名が `Edit` / `RichEdit…` の複数行の窓にしか効かない。ブラウザの入力欄はブラウザが自分で描いているので、`EM_LINESCROLL` などのメッセージが届かない。yamy に無い挙動になる。
 - 対応：候補は (1) UI Automation の `ScrollIntoView`（寄せられるのは上端か下端だけ）、(2) newmayu と一緒に配るブラウザ拡張（JavaScript で中央寄せ。ブラウザごとに作る）。未決：やるかどうか、どちらで実現するか。
+- 該当：未定。
+
+### feature-20
+
+**CapsLock と Ctrl の入れ替えを内蔵する**
+- ゴール：ChangeKey などの別ツールを使わずに、newmayu だけで CapsLock と Ctrl を確実に入れ替えられる。JIS 配列と US 配列の両方で効く。
+- 背景：mayu / yamy のフック（`WH_KEYBOARD_LL`）での差し替えでは、CapsLock がトグルキーとして OS に特別扱いされ、上手く動かないことがある。JIS 配列では CapsLock の位置のキーが英数を兼ね、Shift の有無で送る信号が変わる・離した信号が来ない・IME に横取りされる。Scancode Map（レジストリ）での入れ替えは ChangeKey と同じ層なので確実に効く。yamy に無い機能になる。
+- 対応：newmayu が Scancode Map を書いて管理する。`.mayu` に入れ替えの設定を書き、起動時に実際のレジストリと照合して、ずれていれば知らせる。書き込みには管理者の権限、反映には再ログインか再起動が要り、PC 全体に効く。CapsLock の位置のスキャンコード（JIS・US とも 0x3A の見込み）は実機で確かめる。未決：やるかどうか。
+- 該当：未定。
+
+### feature-21
+
+**NLS キーの退避（yamy の escapeNLSKeys）**
+- ゴール：半角/全角・英数・ひらがな・無変換のキーが、yamy と同じくフックで正しく扱える。
+- 背景：NLS キーは `WH_KEYBOARD_LL` の前に処理されるため、正しくフックできない。yamy は Scancode Map で別のキーに置き換える回避策を持つ（同梱の workaround.reg / workaround.mayu と、`yamy.ini` の `escapeNLSKeys` で動作中だけレジストリを書き換える実験機能。書いた後 winlogon.exe にスレッドを注入して再ログインなしに反映する。yamy の fixscancodemap.cpp）。spec.md の 5 章で ×。
+- 対応：yamy の `escapeNLSKeys` と同じ動きを実装する。
 - 該当：未定。
 
 ## リファクタリング

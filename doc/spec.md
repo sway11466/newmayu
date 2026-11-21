@@ -2,7 +2,7 @@
 
 内部向けの外部仕様。mayu / yamy が受け付ける構文と `&関数` を一覧にし、各行に newmayu の対応を書く。
 yamy 側の正本は mayu のマニュアル（yamy リポジトリ `doc/CUSTOMIZE-ja.html`）、yamy の `readme.txt`、`engine.h` の関数宣言。
-機能範囲の出発点は yamy と同等（`yamy-rebuild.md` 参照）。
+機能範囲の出発点は yamy と同等。
 
 対応の記号：
 
