@@ -39,10 +39,8 @@
 - 起動できないときのメッセージボックス：`yamy.ini` の選択中の設定に存在しない `.mayu` のパスを書いて起こすと、ログと同じ理由がメッセージボックスにも出る。
 - 設定の一覧：yamy の `yamy.ini` を newmayu.exe と同じフォルダに置くと、選択中の設定が読まれる。トレイの「選択」に一覧が並び、選ぶとその設定に切り替わる。「設定」でダイアログが出て、追加・編集・削除・並べ替え・参照ができ、OK で `yamy.ini` に書かれて読み直される。`yamy.ini` も `.mayu` も無いと、起動時に設定ダイアログが出る。
 - 案内の窓（&HelpMessage / &HelpVariable）：出たとき、ピンを押したときに、フォーカス窓からフォーカスを奪わない。
-- &WindowIdentify / &InvestigateCommand / &LoadSetting：default.mayu の C-S-D でフォーカス窓の CLASS・TITLE・位置と大きさがログに出る（コンソールでも出る）。C-S-F1 の後にメニューやボタンを使うと `&PostMessage(…)` の行が出て、もう一度 C-S-F1 で止まる。C-S-S で設定が読み直される。`&LoadSetting("名前")` でその名前の設定に切り替わり、一覧に無い名前ならログに `unknown setting name` が出る。
+- &WindowIdentify / &LoadSetting：コンソールで default.mayu の C-S-D を押しても、CLASS・TITLE・位置と大きさがログに出る。`&LoadSetting("名前")` でその名前の設定に切り替わり、一覧に無い名前ならログに `unknown setting name` が出る。
 - &DescribeBindings：Word で C-S-/ を押すと、ログに Word のキーマップから Global までの割付が yamy と同じ形で並ぶ。
-- &Prefix の ignore_modifiers：emacsedit.mayu の C-X の後に Shift などの修飾キーを押しても、OS へは送られない（2 ストローク目の修飾としてだけ効く）。
-- &EditNextModifier：`define MAP-ESCAPE-TO-META` の default.mayu で、Esc の次に X を押すと Alt+X が出る。
 - ログダイアログ：トレイの「ログ」で出て、起動時の見出しと設定の読み込みのログが並ぶ。「詳細」を付けるとキー変換・フォーカスの行も出る。「ログのクリア」で消えて見出しが出直す。「フォントの変更」でログの文字がすぐ変わり、`yamy.ini` の `logFont` に書かれる。「閉じる」で隠れる。default.mayu などの `&MayuDialog(Log, …)` / `&LogClear` も同じく効く。再読込に失敗するとログダイアログが出る。
 
 ## parking lot
