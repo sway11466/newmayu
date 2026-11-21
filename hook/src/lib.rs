@@ -457,8 +457,7 @@ fn check_sync(hwnd: HWND, lparam: LPARAM, cause: u32) {
     let Some((scan, extended)) = sync_key() else {
         return;
     };
-    let l = lparam.0 as u32;
-    if (l >> 16) & 0xff != scan || ((l >> 24) & 1 != 0) != extended {
+    if !is_sync_key(lparam.0 as u32, scan, extended) {
         return;
     }
     let h = Header {
@@ -472,6 +471,11 @@ fn check_sync(hwnd: HWND, lparam: LPARAM, cause: u32) {
     let mut buf = [0u8; MAX_SIZE];
     let n = write_lock(&mut buf, &h);
     send(&buf[..n]);
+}
+
+/// キーのメッセージの `lparam`（ビット 16〜23 がスキャンコード、ビット 24 が拡張キー）が同期キーか。
+fn is_sync_key(lparam: u32, scan: u32, extended: bool) -> bool {
+    (lparam >> 16) & 0xff == scan && ((lparam >> 24) & 1 != 0) == extended
 }
 
 /// `&InvestigateCommand` の間なら、窓に届いた `WM_COMMAND` / `WM_SYSCOMMAND` を送る（yamy の `notifyCommand`）。
@@ -595,5 +599,68 @@ mod tests {
         assert_eq!(kind("Rich"), None);
         assert_eq!(kind("Button"), None);
         assert_eq!(kind(""), None);
+    }
+
+    fn utf16(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn append_utf16_writes_utf8() {
+        let mut dst = [0u8; MAX_NAME];
+        let n = append_utf16(&mut dst, 0, &utf16("メモ帳"), false);
+        assert_eq!(&dst[..n], "メモ帳".as_bytes());
+    }
+
+    #[test]
+    fn append_utf16_continues_from_the_given_length() {
+        let mut dst = [0u8; MAX_NAME];
+        let n = append_utf16(&mut dst, 0, &utf16("a"), false);
+        let n = append_utf16(&mut dst, n, &utf16(":b"), false);
+        assert_eq!(&dst[..n], b"a:b");
+    }
+
+    #[test]
+    fn append_utf16_replaces_control_characters_in_titles() {
+        let mut dst = [0u8; MAX_NAME];
+        let n = append_utf16(&mut dst, 0, &utf16("a\tb"), true);
+        assert_eq!(&dst[..n], b"a?b");
+    }
+
+    #[test]
+    fn append_utf16_keeps_control_characters_in_class_names() {
+        let mut dst = [0u8; MAX_NAME];
+        let n = append_utf16(&mut dst, 0, &utf16("a\tb"), false);
+        assert_eq!(&dst[..n], b"a\tb");
+    }
+
+    #[test]
+    fn append_utf16_stops_before_a_character_that_does_not_fit() {
+        let mut dst = [0u8; MAX_NAME];
+        // 残り 2 バイトに 3 バイトの文字は入らない
+        let n = append_utf16(&mut dst, MAX_NAME - 2, &utf16("あ"), false);
+        assert_eq!(n, MAX_NAME - 2);
+    }
+
+    #[test]
+    fn key_up_of_the_sync_scan_code_is_the_sync_key() {
+        // def sync = 0x7e
+        assert!(is_sync_key(0xc07e_0001, 0x7e, false));
+    }
+
+    #[test]
+    fn another_scan_code_is_not_the_sync_key() {
+        assert!(!is_sync_key(0xc01e_0001, 0x7e, false));
+    }
+
+    #[test]
+    fn extended_key_is_not_a_plain_sync_key() {
+        assert!(!is_sync_key(0xc17e_0001, 0x7e, false));
+    }
+
+    #[test]
+    fn extended_key_is_the_extended_sync_key() {
+        // def sync = E0-0x7e
+        assert!(is_sync_key(0xc17e_0001, 0x7e, true));
     }
 }

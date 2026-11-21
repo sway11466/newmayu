@@ -1307,6 +1307,8 @@ mod tests {
     /// `C-X` で Sub へ。Sub では C-F が H。プレフィックス中に R_CONTROL を押して F を押す
     fn prefix_then_control_f(ignore_modifiers: bool) -> Vec<Vec<Output>> {
         let (config, mut global) = base();
+        // keymap Global: key C-X = &Prefix(Sub, ignore_modifiers)
+        // keymap Sub : Global: key C-F = H
         let sub = KeymapId(1);
         let ctrl = ModSpec::none().with(BasicMod::Control);
         let (both, any) = (EdgeSpec::Both, LockSpec::any());
@@ -1467,6 +1469,7 @@ mod tests {
     #[test]
     fn default_action_passes_the_physical_key_through() {
         let (mut config, mut global) = base();
+        // key A = B / key C-A = &Default
         // 子キーマップで C-A を &Default にすると、親の A→B を通らず A がそのまま出る
         global.assign(
             A,
@@ -1624,6 +1627,7 @@ mod tests {
     #[test]
     fn shell_execute_is_output_on_press() {
         let (config, mut global) = base();
+        // key A = &ShellExecute(open, "notepad.exe", , , ShowNormal)
         let s = crate::model::ShellExecute {
             operation: "open".into(),
             file: "notepad.exe".into(),
@@ -1646,6 +1650,7 @@ mod tests {
     #[test]
     fn describe_bindings_is_output_on_press() {
         let (config, mut global) = base();
+        // key A = &DescribeBindings
         global.assign(
             A,
             ModSpec::none(),
@@ -1665,6 +1670,7 @@ mod tests {
     #[test]
     fn investigate_and_load_setting_are_output_on_press() {
         let (config, mut global) = base();
+        // key A = &InvestigateCommand &LoadSetting(a)
         global.assign(
             A,
             ModSpec::none(),
@@ -1683,6 +1689,7 @@ mod tests {
     #[test]
     fn mayu_dialog_and_log_clear_are_output_on_press() {
         let (config, mut global) = base();
+        // key A = &MayuDialog(Log, Show) &LogClear
         let show = crate::model::ShowCommand::Show;
         global.assign(
             A,
@@ -1702,6 +1709,9 @@ mod tests {
     #[test]
     fn help_message_and_variable() {
         let (config, mut global) = base();
+        // key A = &HelpMessage("T", "B")
+        // key B = &HelpMessage
+        // key H = &Variable(1, 42) &HelpVariable("繰り返し")
         let (none, both, any) = (ModSpec::none(), EdgeSpec::Both, LockSpec::any());
         let text = HelpText {
             title: "T".into(),
@@ -1825,11 +1835,13 @@ mod tests {
         let (config, mut global) = base();
         let (none, both, any) = (ModSpec::none(), EdgeSpec::Both, LockSpec::any());
         let sub = KeymapId(1);
+        // event before-key-down = X / event after-key-up = H
         global.set_event(EventKind::BeforeKeyDown, vec![Action::key(X)]);
         global.set_event(EventKind::AfterKeyUp, vec![Action::key(H)]);
         // key A = &Prefix(Sub)
         global.assign(A, none, both, any, vec![Action::Prefix(sub, true)]);
         let mut subk = Keymap::new("Sub", Some(GLOBAL));
+        // keymap Sub : Global: event prefixed = F
         subk.set_event(EventKind::Prefixed, vec![Action::key(F)]);
         // keymap Sub: key B = Right
         subk.assign(B, none, both, any, vec![Action::key(RIGHT)]);
@@ -2085,6 +2097,8 @@ mod tests {
     #[test]
     fn child_keymap_falls_back_to_parent() {
         let (config, mut global) = base();
+        // keymap Global: key A = B / key X = &Prefix(Child)
+        // keymap Child : Global
         let child = KeymapId(1);
         global.assign(
             A,
@@ -2138,6 +2152,7 @@ mod tests {
     #[test]
     fn held_key_is_released_even_if_composition_ended() {
         let (config, mut global) = base();
+        // key A = B / key IC-A = X
         let d = LockSpec::assign_default();
         global.assign(A, ModSpec::none(), EdgeSpec::Both, d, vec![Action::key(B)]);
         global.assign(
@@ -2306,5 +2321,108 @@ mod tests {
             feed(&mut e, Input::up(X)),
             vec![Output::Release(X), Output::Release(F)]
         );
+    }
+
+    #[test]
+    fn keymap_parent_resolves_in_the_parent_keymap() {
+        let (config, mut global) = base();
+        let (none, both, any) = (ModSpec::none(), EdgeSpec::Both, LockSpec::any());
+        let child = KeymapId(1);
+        // keymap Global: key A = B / key X = &Prefix(Child)
+        global.assign(A, none, both, any, vec![Action::key(B)]);
+        global.assign(X, none, both, any, vec![Action::Prefix(child, true)]);
+        // keymap Child : Global: key A = &KeymapParent
+        let mut c = Keymap::new("Child", Some(GLOBAL));
+        c.assign(A, none, both, any, vec![Action::KeymapParent]);
+        let mut e = engine(config, vec![global, c]);
+
+        feed(&mut e, Input::down(X));
+        feed(&mut e, Input::up(X));
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+    }
+
+    #[test]
+    fn undefined_is_output_on_press() {
+        let (config, mut global) = base();
+        // key A = &Undefined
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::any(),
+            vec![Action::Func(Func::Undefined)],
+        );
+        let mut e = engine(config, vec![global]);
+        e.set_focus(0x1234, "x.exe:A", "");
+        assert_eq!(
+            feed(&mut e, Input::down(A)),
+            vec![Output::Func {
+                hwnd: 0x1234,
+                func: Func::Undefined
+            }]
+        );
+    }
+
+    #[test]
+    fn caps_lock_is_a_condition() {
+        let (config, mut global) = base();
+        // key CL-A = B
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::assign_default().with(LockMod::CapsLock),
+            vec![Action::key(B)],
+        );
+        let mut e = engine(config, vec![global]);
+        e.set_lock(LockMod::CapsLock, true);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+    }
+
+    #[test]
+    fn scroll_lock_is_a_condition() {
+        let (config, mut global) = base();
+        // key SL-A = B
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::assign_default().with(LockMod::ScrollLock),
+            vec![Action::key(B)],
+        );
+        let mut e = engine(config, vec![global]);
+        e.set_lock(LockMod::ScrollLock, true);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+    }
+
+    #[test]
+    fn kana_lock_is_a_condition() {
+        let (config, mut global) = base();
+        // key KL-A = B
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::assign_default().with(LockMod::KanaLock),
+            vec![Action::key(B)],
+        );
+        let mut e = engine(config, vec![global]);
+        e.set_lock(LockMod::KanaLock, true);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(B)]);
+    }
+
+    #[test]
+    fn lock_condition_is_not_met_while_the_lock_is_off() {
+        let (config, mut global) = base();
+        // key CL-A = B
+        global.assign(
+            A,
+            ModSpec::none(),
+            EdgeSpec::Both,
+            LockSpec::assign_default().with(LockMod::CapsLock),
+            vec![Action::key(B)],
+        );
+        let mut e = engine(config, vec![global]);
+        assert_eq!(feed(&mut e, Input::down(A)), vec![Output::Press(A)]);
     }
 }

@@ -260,22 +260,11 @@ impl Setting<'_> {
     fn command(&self, dlg: HWND, id: i32) -> bool {
         match id {
             IDC_BUTTON_UP | IDC_BUTTON_DOWN => {
-                let count = self.count();
-                if count < 2 {
-                    return true;
-                }
                 let Some(index) = self.selected() else {
                     return true;
                 };
-                if (id == IDC_BUTTON_UP && index == 0)
-                    || (id == IDC_BUTTON_DOWN && index == count - 1)
-                {
+                let Some(target) = move_target(id == IDC_BUTTON_UP, index, self.count()) else {
                     return true;
-                }
-                let target = if id == IDC_BUTTON_UP {
-                    index - 1
-                } else {
-                    index + 1
                 };
                 let a = self.get(index);
                 let b = self.get(target);
@@ -293,12 +282,8 @@ impl Setting<'_> {
             IDC_BUTTON_DELETE => {
                 if let Some(index) = self.selected() {
                     self.send(LVM_DELETEITEM, index as usize, 0);
-                    let count = self.count();
-                    if count == 0 {
-                    } else if count == index {
-                        self.select(index - 1);
-                    } else {
-                        self.select(index);
+                    if let Some(next) = selection_after_delete(index, self.count()) {
+                        self.select(next);
                     }
                 }
             }
@@ -322,6 +307,27 @@ impl Setting<'_> {
             _ => return false,
         }
         true
+    }
+}
+
+/// 「上へ」「下へ」で入れ替える相手の行。動かせなければ `None`（yamy の dlgsetting.cpp）。
+/// `index` は選んでいる行、`count` は行の数。
+fn move_target(up: bool, index: i32, count: i32) -> Option<i32> {
+    if count < 2 || (up && index == 0) || (!up && index == count - 1) {
+        return None;
+    }
+    Some(if up { index - 1 } else { index + 1 })
+}
+
+/// 行を削除した後に選ぶ行。`index` は削除した行、`count` は削除した後の行の数。
+/// 行が無くなれば `None`（yamy の dlgsetting.cpp）。
+fn selection_after_delete(index: i32, count: i32) -> Option<i32> {
+    if count == 0 {
+        None
+    } else if count == index {
+        Some(index - 1)
+    } else {
+        Some(index)
     }
 }
 
@@ -615,5 +621,50 @@ fn browse(owner: HWND) -> Option<String> {
         Some(String::from_utf16_lossy(&file[..n]))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn up_swaps_with_the_row_above() {
+        assert_eq!(move_target(true, 1, 3), Some(0));
+    }
+
+    #[test]
+    fn down_swaps_with_the_row_below() {
+        assert_eq!(move_target(false, 1, 3), Some(2));
+    }
+
+    #[test]
+    fn up_on_the_first_row_does_nothing() {
+        assert_eq!(move_target(true, 0, 3), None);
+    }
+
+    #[test]
+    fn down_on_the_last_row_does_nothing() {
+        assert_eq!(move_target(false, 2, 3), None);
+    }
+
+    #[test]
+    fn a_single_row_does_not_move() {
+        assert_eq!(move_target(false, 0, 1), None);
+    }
+
+    #[test]
+    fn deleting_a_middle_row_selects_the_row_that_came_up() {
+        assert_eq!(selection_after_delete(1, 2), Some(1));
+    }
+
+    #[test]
+    fn deleting_the_last_row_selects_the_new_last_row() {
+        assert_eq!(selection_after_delete(2, 2), Some(1));
+    }
+
+    #[test]
+    fn deleting_the_only_row_selects_nothing() {
+        assert_eq!(selection_after_delete(0, 0), None);
     }
 }

@@ -2033,48 +2033,140 @@ mod tests {
         }
     }
 
+    fn keys_of(km: &Keymap) -> Vec<Key> {
+        km.assignments.iter().map(|a| a.key).collect()
+    }
+
+    fn named<'a>(c: &'a Config, name: &str) -> &'a Keymap {
+        c.keymaps.iter().find(|k| k.name == name).unwrap()
+    }
+
+    fn id_of(c: &Config, name: &str) -> KeymapId {
+        KeymapId(c.keymaps.iter().position(|k| k.name == name).unwrap())
+    }
+
+    /// 一時フォルダにファイルを書いて、先頭のファイルを読ませる。`files` は（相対パス, 中身）。
+    fn load_files(
+        tag: &str,
+        files: &[(&str, &[u8])],
+        symbols: &[String],
+    ) -> std::result::Result<Config, LoadError> {
+        let dir = std::env::temp_dir().join(format!("newmayu-{tag}-{}", std::process::id()));
+        for (name, bytes) in files {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let r = load(&dir.join(files[0].0), symbols);
+        std::fs::remove_dir_all(&dir).unwrap();
+        r
+    }
+
+    // ---- def key / def mod / key ------------------------------------------
+
+    const SIMPLE: &str = "key A = B\nkey bs = Space";
+
     #[test]
-    fn def_key_mod_alias_and_simple_assign() {
-        let c = load_ok("key A = B\nkey bs = Space");
+    fn def_mod_lists_the_modifier_keys() {
+        // def mod shift = LShift RShift / def mod control = LControl RControl
+        let c = load_ok(SIMPLE);
         assert_eq!(c.def_mods[BasicMod::Shift.index()], vec![LSHIFT, RSHIFT]);
         assert_eq!(
             c.def_mods[BasicMod::Control.index()],
             vec![LCONTROL, RCONTROL]
         );
-        let g = global(&c);
-        assert_eq!(g.name, "Global");
-        assert_eq!(g.mod_keys[BasicMod::Shift.index()], vec![LSHIFT, RSHIFT]);
-        let a = only(g, A);
-        assert_eq!(a.mods, base());
-        assert_eq!(a.edge, EdgeSpec::Both);
-        assert_eq!(a.actions, vec![Action::key_with(B, base())]);
-        // 別名 BS（大文字小文字は無視）で引ける
-        assert_eq!(only(g, BS).actions[0], Action::key_with(SPACE, base()));
     }
 
     #[test]
-    fn modifier_prefixes() {
-        let c = load_ok(
-            "key C-S-A = B
+    fn first_keymap_is_global() {
+        let c = load_ok(SIMPLE);
+        assert_eq!(global(&c).name, "Global");
+    }
+
+    #[test]
+    fn global_starts_from_def_mod() {
+        let c = load_ok(SIMPLE);
+        assert_eq!(
+            global(&c).mod_keys[BasicMod::Shift.index()],
+            vec![LSHIFT, RSHIFT]
+        );
+    }
+
+    #[test]
+    fn key_assigns_an_output_key() {
+        // key A = B
+        let c = load_ok(SIMPLE);
+        let a = only(global(&c), A);
+        assert_eq!(a.mods, base());
+        assert_eq!(a.edge, EdgeSpec::Both);
+        assert_eq!(a.actions, vec![Action::key_with(B, base())]);
+    }
+
+    #[test]
+    fn second_name_of_def_key_names_the_key_ignoring_case() {
+        // def key BackSpace BS = 0x0e / key bs = Space
+        let c = load_ok(SIMPLE);
+        assert_eq!(
+            only(global(&c), BS).actions[0],
+            Action::key_with(SPACE, base())
+        );
+    }
+
+    // ---- 修飾 ---------------------------------------------------------------
+
+    const MODIFIERS: &str = "key C-S-A = B
              key *H = B
              key ~S-*Space = B
              key D-BackSpace = B
-             key U-LAlt = S-*B D-LShift U-LShift",
-        );
-        let g = global(&c);
+             key U-LAlt = S-*B D-LShift U-LShift";
+
+    #[test]
+    fn c_and_s_prefixes_require_the_modifiers() {
+        // key C-S-A = B
+        let c = load_ok(MODIFIERS);
         assert_eq!(
-            only(g, A).mods,
+            only(global(&c), A).mods,
             base().with(BasicMod::Control).with(BasicMod::Shift)
         );
-        // `*` がキー名の直前: 全部 dontcare
-        assert_eq!(only(g, H).mods, ModSpec::any());
-        // `~S-` は離し、残りは dontcare
-        assert_eq!(only(g, SPACE).mods, ModSpec::any().without(BasicMod::Shift));
-        assert_eq!(only(g, BS).edge, EdgeSpec::Down);
-        let alt = only(g, LALT);
-        assert_eq!(alt.edge, EdgeSpec::Up);
+    }
+
+    #[test]
+    fn star_before_the_key_name_makes_all_modifiers_dontcare() {
+        // key *H = B
+        let c = load_ok(MODIFIERS);
+        assert_eq!(only(global(&c), H).mods, ModSpec::any());
+    }
+
+    #[test]
+    fn tilde_requires_the_modifier_released() {
+        // key ~S-*Space = B
+        let c = load_ok(MODIFIERS);
         assert_eq!(
-            alt.actions,
+            only(global(&c), SPACE).mods,
+            ModSpec::any().without(BasicMod::Shift)
+        );
+    }
+
+    #[test]
+    fn d_prefix_is_key_down_only() {
+        // key D-BackSpace = B
+        let c = load_ok(MODIFIERS);
+        assert_eq!(only(global(&c), BS).edge, EdgeSpec::Down);
+    }
+
+    #[test]
+    fn u_prefix_is_key_up_only() {
+        // key U-LAlt = …
+        let c = load_ok(MODIFIERS);
+        assert_eq!(only(global(&c), LALT).edge, EdgeSpec::Up);
+    }
+
+    #[test]
+    fn output_keys_take_modifier_and_edge_prefixes() {
+        // key U-LAlt = S-*B D-LShift U-LShift
+        let c = load_ok(MODIFIERS);
+        assert_eq!(
+            only(global(&c), LALT).actions,
             vec![
                 Action::Key {
                     key: B,
@@ -2098,46 +2190,64 @@ mod tests {
         );
     }
 
-    #[test]
-    fn keyseq_expands_and_prefix_switches() {
-        let c = load_ok(
-            "define KBD109
+    // ---- keyseq / keymap ----------------------------------------------------
+
+    const KEYSEQ: &str = "define KBD109
              def sync = 0x7e
              keyseq $CapsLock = S-英数
              keymap Sub
               key B = A
              keymap Main
               key A = $capslock ( B H ) &Prefix(Sub)
-              key C-B = &default",
-        );
-        let main = &c.keymaps[2];
-        assert_eq!(main.name, "Main");
-        let sub_id = KeymapId(1);
-        assert_eq!(c.keymap(sub_id).name, "Sub");
+              key C-B = &default";
+
+    #[test]
+    fn keymaps_are_numbered_in_definition_order() {
+        let c = load_ok(KEYSEQ);
+        assert_eq!(c.keymaps[2].name, "Main");
+        assert_eq!(c.keymap(KeymapId(1)).name, "Sub");
+    }
+
+    #[test]
+    fn keyseq_and_group_expand_in_place() {
+        // key A = $capslock ( B H ) &Prefix(Sub)
+        let c = load_ok(KEYSEQ);
         assert_eq!(
-            only(main, A).actions,
+            only(&c.keymaps[2], A).actions,
             vec![
                 in_keyseq(EISUU, base().with(BasicMod::Shift)),
                 Action::key_with(B, base()),
                 Action::key_with(H, base()),
-                Action::Prefix(sub_id, true),
+                Action::Prefix(KeymapId(1), true),
             ]
         );
-        let cb = only(main, B);
+    }
+
+    #[test]
+    fn function_names_ignore_case() {
+        // key C-B = &default
+        let c = load_ok(KEYSEQ);
+        let cb = only(&c.keymaps[2], B);
         assert!(cb.mods.is_pressed(BasicMod::Control));
         assert_eq!(cb.actions, vec![Action::Default]);
     }
 
     #[test]
-    fn keymap_names_a_defined_keymap() {
+    fn keymap_function_names_a_defined_keymap() {
         let c = load_ok(
             "keymap Sub
               key B = A
              keymap Main
               key A = &Keymap(sub)",
         );
-        let main = &c.keymaps[2];
-        assert_eq!(only(main, A).actions, vec![Action::Keymap(KeymapId(1))]);
+        assert_eq!(
+            only(&c.keymaps[2], A).actions,
+            vec![Action::Keymap(KeymapId(1))]
+        );
+    }
+
+    #[test]
+    fn keymap_function_with_an_unknown_name_is_an_error() {
         assert!(
             load_err("key A = &Keymap(Nowhere)")
                 .message
@@ -2145,30 +2255,58 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mod_inheritance_is_resolved() {
-        let c = load_ok(
-            "mod shift += E0RShift
+    // ---- mod ----------------------------------------------------------------
+
+    const MOD_INHERIT: &str = "mod shift += E0RShift
              keymap Child : Global
               mod control -= LControl
               mod alt = 英数
              keymap Root
-              mod shift = 英数",
-        );
-        let g = &c.keymaps[0];
+              mod shift = 英数";
+
+    #[test]
+    fn mod_plus_equal_adds_a_key() {
+        // mod shift += E0RShift
+        let c = load_ok(MOD_INHERIT);
         assert_eq!(
-            g.mod_keys[BasicMod::Shift.index()],
+            c.keymaps[0].mod_keys[BasicMod::Shift.index()],
             vec![LSHIFT, RSHIFT, E0RSHIFT]
         );
+    }
+
+    #[test]
+    fn child_keymap_inherits_the_modifier_keys() {
+        // keymap Child : Global
+        let c = load_ok(MOD_INHERIT);
         let child = &c.keymaps[1];
         assert_eq!(child.parent, Some(KeymapId(0)));
         assert_eq!(
             child.mod_keys[BasicMod::Shift.index()],
             vec![LSHIFT, RSHIFT, E0RSHIFT]
         );
-        assert_eq!(child.mod_keys[BasicMod::Control.index()], vec![RCONTROL]);
-        assert_eq!(child.mod_keys[BasicMod::Alt.index()], vec![EISUU]);
-        // 親無しのキーマップは def mod から始まる
+    }
+
+    #[test]
+    fn mod_minus_equal_removes_a_key() {
+        // mod control -= LControl
+        let c = load_ok(MOD_INHERIT);
+        assert_eq!(
+            c.keymaps[1].mod_keys[BasicMod::Control.index()],
+            vec![RCONTROL]
+        );
+    }
+
+    #[test]
+    fn mod_equal_replaces_the_keys() {
+        // mod alt = 英数
+        let c = load_ok(MOD_INHERIT);
+        assert_eq!(c.keymaps[1].mod_keys[BasicMod::Alt.index()], vec![EISUU]);
+    }
+
+    #[test]
+    fn keymap_without_a_parent_starts_from_def_mod() {
+        // keymap Root / mod shift = 英数
+        let c = load_ok(MOD_INHERIT);
         let root = &c.keymaps[2];
         assert_eq!(root.parent, None);
         assert_eq!(root.mod_keys[BasicMod::Shift.index()], vec![EISUU]);
@@ -2178,33 +2316,62 @@ mod tests {
         );
     }
 
-    #[test]
-    fn one_shot_modifier() {
-        let c = load_ok(
-            "mod alt = !!LAlt
+    const ONE_SHOT: &str = "mod alt = !!LAlt
              mod control += !!英数
              mod control += 英数
              mod shift += !!E0RShift
              keymap Child : Global
-              mod shift -= E0RShift",
-        );
+              mod shift -= E0RShift";
+
+    #[test]
+    fn one_shot_keys_are_modifier_keys() {
+        let c = load_ok(ONE_SHOT);
         let g = &c.keymaps[0];
         assert_eq!(g.mod_keys[BasicMod::Alt.index()], vec![LALT]);
         assert_eq!(
             g.mod_keys[BasicMod::Control.index()],
             vec![LCONTROL, RCONTROL, EISUU]
         );
-        // 同じキーマップで書き直すと最後の書き方になる（yamy の addModifier）
+    }
+
+    #[test]
+    fn double_bang_marks_a_one_shot_modifier() {
+        // mod alt = !!LAlt / mod shift += !!E0RShift
+        let c = load_ok(ONE_SHOT);
+        let g = &c.keymaps[0];
         assert!(g.is_one_shot(BasicMod::Alt, LALT));
-        assert!(!g.is_one_shot(BasicMod::Control, EISUU));
         assert!(g.is_one_shot(BasicMod::Shift, E0RSHIFT));
         assert!(!g.is_one_shot(BasicMod::Shift, LSHIFT));
-        // 親から継承し、外したキーは外れる
-        let child = &c.keymaps[1];
-        assert!(child.is_one_shot(BasicMod::Alt, LALT));
-        assert!(!child.is_one_shot(BasicMod::Shift, E0RSHIFT));
-        // ! と !!! はまだ読まない
+    }
+
+    #[test]
+    fn rewriting_a_modifier_key_uses_the_last_form() {
+        // mod control += !!英数 / mod control += 英数
+        // 同じキーマップで書き直すと最後の書き方になる（yamy の addModifier）
+        let c = load_ok(ONE_SHOT);
+        assert!(!c.keymaps[0].is_one_shot(BasicMod::Control, EISUU));
+    }
+
+    #[test]
+    fn child_keymap_inherits_one_shot() {
+        let c = load_ok(ONE_SHOT);
+        assert!(c.keymaps[1].is_one_shot(BasicMod::Alt, LALT));
+    }
+
+    #[test]
+    fn removed_key_is_no_longer_one_shot() {
+        // keymap Child : Global / mod shift -= E0RShift
+        let c = load_ok(ONE_SHOT);
+        assert!(!c.keymaps[1].is_one_shot(BasicMod::Shift, E0RSHIFT));
+    }
+
+    #[test]
+    fn single_bang_modifier_is_not_supported() {
         assert!(load_err("mod alt = !LAlt").message.contains("未対応"));
+    }
+
+    #[test]
+    fn triple_bang_modifier_is_not_supported() {
         assert!(load_err("mod alt = !!!LAlt").message.contains("未対応"));
     }
 
@@ -2221,6 +2388,10 @@ mod tests {
         assert_eq!(c.keymaps.len(), 2);
         assert_eq!(c.keymaps[0].assignments.len(), 1);
         assert_eq!(c.keymaps[1].assignments.len(), 2);
+    }
+
+    #[test]
+    fn reopening_a_keymap_with_another_parent_is_an_error() {
         assert!(
             load_err(
                 "keymap Sub
@@ -2231,10 +2402,9 @@ keymap Sub : Global"
         );
     }
 
-    #[test]
-    fn if_else_endif() {
-        let c = load_ok(
-            "define KBD109
+    // ---- if / else / endif --------------------------------------------------
+
+    const IF_SRC: &str = "define KBD109
              if ( KBD109 )
                key A = B
                if ( !KBD109 )
@@ -2258,31 +2428,80 @@ keymap Sub : Global"
              if ( KBD104 )
                key RControl = B
              endif
-             key LAlt = B",
-        );
-        let g = global(&c);
-        let keys: Vec<Key> = g.assignments.iter().map(|a| a.key).collect();
-        assert!(keys.contains(&A));
-        assert_eq!(only(g, H).actions[0], Action::key_with(A, base()));
-        assert!(!keys.contains(&SPACE), "else 側は読まない");
-        assert!(!keys.contains(&BS), "1 行 if は条件が偽なら読まない");
-        assert!(keys.contains(&LSHIFT), "and で両方真");
-        assert!(!keys.contains(&RSHIFT), "and で片方偽");
-        assert!(keys.contains(&LCONTROL), "elseif");
-        assert!(
-            !keys.contains(&RCONTROL),
-            "読まない区間の define は効かない"
-        );
-        assert!(keys.contains(&LALT), "endif の後は読む");
-        assert!(load_err("endif").message.contains("対応する if"));
-        assert!(load_err("else").message.contains("対応する if"));
-        assert!(load_err("if KBD109").message.contains("`(`"));
+             key LAlt = B";
+
+    /// `IF_SRC` を読んで割付が入ったキー。
+    fn if_keys() -> Vec<Key> {
+        keys_of(global(&load_ok(IF_SRC)))
     }
 
     #[test]
-    fn ime_modifiers() {
-        let c = load_ok(
-            "key A = B
+    fn if_reads_the_block_when_the_symbol_is_defined() {
+        assert!(if_keys().contains(&A));
+    }
+
+    #[test]
+    fn nested_else_is_read_when_the_nested_if_is_false() {
+        let c = load_ok(IF_SRC);
+        assert_eq!(only(global(&c), H).actions[0], Action::key_with(A, base()));
+    }
+
+    #[test]
+    fn else_is_skipped_when_the_if_is_true() {
+        assert!(!if_keys().contains(&SPACE), "else 側は読まない");
+    }
+
+    #[test]
+    fn one_line_if_is_skipped_when_false() {
+        assert!(!if_keys().contains(&BS), "1 行 if は条件が偽なら読まない");
+    }
+
+    #[test]
+    fn and_is_true_when_both_are_true() {
+        assert!(if_keys().contains(&LSHIFT), "and で両方真");
+    }
+
+    #[test]
+    fn and_is_false_when_one_is_false() {
+        assert!(!if_keys().contains(&RSHIFT), "and で片方偽");
+    }
+
+    #[test]
+    fn elseif_is_read_when_the_if_is_false() {
+        assert!(if_keys().contains(&LCONTROL), "elseif");
+    }
+
+    #[test]
+    fn define_in_a_skipped_block_has_no_effect() {
+        assert!(
+            !if_keys().contains(&RCONTROL),
+            "読まない区間の define は効かない"
+        );
+    }
+
+    #[test]
+    fn statements_after_endif_are_read() {
+        assert!(if_keys().contains(&LALT), "endif の後は読む");
+    }
+
+    #[test]
+    fn endif_without_if_is_an_error() {
+        assert!(load_err("endif").message.contains("対応する if"));
+    }
+
+    #[test]
+    fn else_without_if_is_an_error() {
+        assert!(load_err("else").message.contains("対応する if"));
+    }
+
+    #[test]
+    fn if_needs_a_parenthesis() {
+        assert!(load_err("if KBD109").message.contains("`(`"));
+    }
+
+    // ---- IME・ロックの条件 ----------------------------------------------------
+
+    const IME_SRC: &str = "key A = B
              key IC-H = B
              key I-Space = B
              key IL-BackSpace = B
@@ -2291,104 +2510,252 @@ keymap Sub : Global"
              key ~IL-LControl = B
              key ~*RControl = B
              key S-~NL-LAlt = B
-             key CL-SL-KL-Eisuu = B",
-        );
-        let g = global(&c);
-        let d = LockSpec::assign_default();
+             key CL-SL-KL-Eisuu = B";
+
+    #[test]
+    fn default_condition_requires_not_composing() {
+        // key A = B
         // 既定: 変換中でないことを要求、IME オンは問わない
+        let c = load_ok(IME_SRC);
+        let d = LockSpec::assign_default();
         assert!(!d.is_dontcare(LockMod::ImeComp) && !d.is_on(LockMod::ImeComp));
         assert!(d.is_dontcare(LockMod::ImeLock));
-        assert_eq!(only(g, A).locks, d);
-        assert_eq!(only(g, H).locks, d.with(LockMod::ImeComp));
-        assert_eq!(only(g, SPACE).locks, d.with(LockMod::ImeComp));
-        assert_eq!(only(g, BS).locks, d.with(LockMod::ImeLock));
+        assert_eq!(only(global(&c), A).locks, d);
+    }
+
+    #[test]
+    fn ic_prefix_requires_composing() {
+        // key IC-H = B
+        let c = load_ok(IME_SRC);
+        assert_eq!(
+            only(global(&c), H).locks,
+            LockSpec::assign_default().with(LockMod::ImeComp)
+        );
+    }
+
+    #[test]
+    fn i_prefix_is_the_same_as_ic() {
+        // key I-Space = B
+        let c = load_ok(IME_SRC);
+        assert_eq!(
+            only(global(&c), SPACE).locks,
+            LockSpec::assign_default().with(LockMod::ImeComp)
+        );
+    }
+
+    #[test]
+    fn il_prefix_requires_ime_on() {
+        // key IL-BackSpace = B
+        let c = load_ok(IME_SRC);
+        assert_eq!(
+            only(global(&c), BS).locks,
+            LockSpec::assign_default().with(LockMod::ImeLock)
+        );
+    }
+
+    #[test]
+    fn star_ic_does_not_care_about_composing() {
+        // key *IC-C-LShift = B
         // `*IC-` は変換中かを問わない。基本修飾は普通に読む
-        let ls = only(g, LSHIFT);
+        let c = load_ok(IME_SRC);
+        let ls = only(global(&c), LSHIFT);
         assert_eq!(ls.locks, LockSpec::any());
         assert_eq!(ls.mods, base().with(BasicMod::Control));
-        // キー名の直前の `*` は鍵の条件も全部 dontcare
-        assert_eq!(only(g, RSHIFT).locks, LockSpec::any());
-        assert_eq!(only(g, LCONTROL).locks, d.without(LockMod::ImeLock));
-        // `~*` はキー名の直前の `*` と同じで、全部 dontcare
-        assert_eq!(only(g, RCONTROL).locks, LockSpec::any());
-        let la = only(g, LALT);
-        assert_eq!(la.locks, d.without(LockMod::NumLock));
-        assert_eq!(la.mods, base().with(BasicMod::Shift));
+    }
+
+    #[test]
+    fn star_before_the_key_name_makes_all_locks_dontcare() {
+        // key *RShift = B
+        let c = load_ok(IME_SRC);
+        assert_eq!(only(global(&c), RSHIFT).locks, LockSpec::any());
+    }
+
+    #[test]
+    fn tilde_il_requires_ime_off() {
+        // key ~IL-LControl = B
+        let c = load_ok(IME_SRC);
         assert_eq!(
-            only(g, EISUU).locks,
-            d.with(LockMod::CapsLock)
+            only(global(&c), LCONTROL).locks,
+            LockSpec::assign_default().without(LockMod::ImeLock)
+        );
+    }
+
+    #[test]
+    fn tilde_star_is_the_same_as_star() {
+        // key ~*RControl = B
+        // `~*` はキー名の直前の `*` と同じで、全部 dontcare
+        let c = load_ok(IME_SRC);
+        assert_eq!(only(global(&c), RCONTROL).locks, LockSpec::any());
+    }
+
+    #[test]
+    fn tilde_nl_requires_num_lock_off() {
+        // key S-~NL-LAlt = B
+        let c = load_ok(IME_SRC);
+        let la = only(global(&c), LALT);
+        assert_eq!(
+            la.locks,
+            LockSpec::assign_default().without(LockMod::NumLock)
+        );
+        assert_eq!(la.mods, base().with(BasicMod::Shift));
+    }
+
+    #[test]
+    fn cl_sl_kl_prefixes_require_the_locks() {
+        // key CL-SL-KL-Eisuu = B
+        let c = load_ok(IME_SRC);
+        assert_eq!(
+            only(global(&c), EISUU).locks,
+            LockSpec::assign_default()
+                .with(LockMod::CapsLock)
                 .with(LockMod::ScrollLock)
                 .with(LockMod::KanaLock)
         );
     }
 
-    #[test]
-    fn window_and_keymap2() {
-        let c = load_ok(
-            "window Edit /:Edit$/ : Global
+    // ---- window / keymap2 ---------------------------------------------------
+
+    const WINDOW_SRC: &str = "window Edit /:Edit$/ : Global
               key A = H
              window Both ( /notepad/ && /メモ帳/ ) : Edit
              window Either ( /qq/ || /zz/ )
              keymap2 Sub : Global = &KeymapParent
              keymap KeymapDefault = &Default
              window Plain : Global
-             keymap Global",
-        );
-        let by_name = |n: &str| c.keymaps.iter().position(|k| k.name == n).unwrap();
-        let g = global(&c);
-        assert_eq!(g.default_actions, vec![Action::OtherWindowClass]);
-        assert!(g.window.as_ref().unwrap().matches("", ""));
+             keymap Global";
 
-        let edit = &c.keymaps[by_name("Edit")];
-        let w = edit.window.as_ref().unwrap();
+    #[test]
+    fn global_default_action_is_other_window_class() {
+        let c = load_ok(WINDOW_SRC);
+        assert_eq!(global(&c).default_actions, vec![Action::OtherWindowClass]);
+    }
+
+    #[test]
+    fn global_matches_any_window() {
+        let c = load_ok(WINDOW_SRC);
+        assert!(global(&c).window.as_ref().unwrap().matches("", ""));
+    }
+
+    #[test]
+    fn window_matches_the_class_regex() {
+        // window Edit /:Edit$/ : Global
+        let c = load_ok(WINDOW_SRC);
+        let w = named(&c, "Edit").window.as_ref().unwrap();
         assert!(w.matches("notepad.exe:Notepad:Edit", ""));
-        assert!(w.matches("x:EDIT", "大文字小文字は区別しない"));
         assert!(!w.matches("x:Editor", ""));
-        assert_eq!(edit.default_actions, vec![Action::KeymapParent]);
-        assert_eq!(only(edit, A).actions, vec![Action::key_with(H, base())]);
+    }
 
-        let both = c.keymaps[by_name("Both")].window.as_ref().unwrap();
+    #[test]
+    fn window_regex_ignores_case() {
+        let c = load_ok(WINDOW_SRC);
+        let w = named(&c, "Edit").window.as_ref().unwrap();
+        assert!(w.matches("x:EDIT", "大文字小文字は区別しない"));
+    }
+
+    #[test]
+    fn window_default_action_is_keymap_parent() {
+        let c = load_ok(WINDOW_SRC);
+        assert_eq!(
+            named(&c, "Edit").default_actions,
+            vec![Action::KeymapParent]
+        );
+    }
+
+    #[test]
+    fn key_after_window_goes_into_the_window_keymap() {
+        // window Edit /:Edit$/ : Global / key A = H
+        let c = load_ok(WINDOW_SRC);
+        assert_eq!(
+            only(named(&c, "Edit"), A).actions,
+            vec![Action::key_with(H, base())]
+        );
+    }
+
+    #[test]
+    fn window_with_and_needs_both_class_and_title() {
+        // window Both ( /notepad/ && /メモ帳/ ) : Edit
+        let c = load_ok(WINDOW_SRC);
+        let both = named(&c, "Both").window.as_ref().unwrap();
         assert!(both.matches("notepad.exe:Edit", "無題 - メモ帳"));
         assert!(!both.matches("notepad.exe:Edit", ""));
-        let either = c.keymaps[by_name("Either")].window.as_ref().unwrap();
+    }
+
+    #[test]
+    fn window_with_or_needs_class_or_title() {
+        // window Either ( /qq/ || /zz/ )
+        let c = load_ok(WINDOW_SRC);
+        let either = named(&c, "Either").window.as_ref().unwrap();
         assert!(either.matches("qq", ""));
         assert!(either.matches("", "zz"));
         assert!(!either.matches("", ""));
+    }
 
+    #[test]
+    fn keymap2_reads_its_default_action() {
+        // keymap2 Sub : Global = &KeymapParent
+        let c = load_ok(WINDOW_SRC);
+        assert_eq!(named(&c, "Sub").default_actions, vec![Action::KeymapParent]);
+    }
+
+    #[test]
+    fn keymap_reads_its_default_action() {
+        // keymap KeymapDefault = &Default
+        let c = load_ok(WINDOW_SRC);
         assert_eq!(
-            c.keymaps[by_name("Sub")].default_actions,
-            vec![Action::KeymapParent]
-        );
-        assert_eq!(
-            c.keymaps[by_name("KeymapDefault")].default_actions,
+            named(&c, "KeymapDefault").default_actions,
             vec![Action::Default]
         );
-        let plain = &c.keymaps[by_name("Plain")];
+    }
+
+    #[test]
+    fn window_without_a_condition_is_a_keymap() {
+        // window Plain : Global
+        let c = load_ok(WINDOW_SRC);
+        let plain = named(&c, "Plain");
         assert!(plain.window.is_none(), "条件の無い window は普通の keymap");
         assert_eq!(plain.parent, Some(KeymapId(0)));
+    }
 
-        // 後に定義した window ほど先。Global は最後
+    #[test]
+    fn later_window_is_matched_first_and_global_is_last() {
+        let c = load_ok(WINDOW_SRC);
         assert_eq!(
             c.focus_keymaps("notepad.exe:Notepad:Edit", "無題 - メモ帳"),
-            vec![
-                KeymapId(by_name("Both")),
-                KeymapId(by_name("Edit")),
-                KeymapId(0)
-            ]
+            vec![id_of(&c, "Both"), id_of(&c, "Edit"), KeymapId(0)]
         );
-        assert_eq!(c.focus_keymaps("chrome.exe:Chrome", ""), vec![KeymapId(0)]);
+    }
 
+    #[test]
+    fn unmatched_window_uses_only_global() {
+        let c = load_ok(WINDOW_SRC);
+        assert_eq!(c.focus_keymaps("chrome.exe:Chrome", ""), vec![KeymapId(0)]);
+    }
+
+    #[test]
+    fn bad_window_regex_is_an_error() {
         assert!(
             load_err("window Bad /(/ : Global")
                 .message
                 .contains("正規表現")
         );
+    }
+
+    #[test]
+    fn window_condition_needs_an_operator() {
         assert!(load_err("window Bad ( /a/ /b/ )").message.contains("`&&`"));
+    }
+
+    #[test]
+    fn keymap_default_action_cannot_be_changed() {
         assert!(
             load_err("keymap K = &Default\nkeymap K = &KeymapParent")
                 .message
                 .contains("既定動作")
         );
+    }
+
+    #[test]
+    fn window_condition_cannot_be_changed() {
         assert!(
             load_err("window W /a/\nwindow W /b/")
                 .message
@@ -2396,53 +2763,71 @@ keymap Sub : Global"
         );
     }
 
-    #[test]
-    fn window_functions_and_arguments() {
-        use crate::model::Target;
-        let c = load_ok(
-            "key A = &WindowMove(-16, 0)
+    // ---- 窓の関数と引数 --------------------------------------------------------
+
+    const WINFUNC_SRC: &str = "key A = &WindowMove(-16, 0)
              key B = &WindowMove(1, 2, MDI)
              key H = &WindowLower &WindowRaise(mdi) &WindowMaximize
              key Space = &WindowClingToLeft &WindowClingToBottom(MDI)
              key BackSpace = &WindowSetAlpha(70) &WindowToggleTopMost &WindowRedraw &Recenter
              key LShift = &MouseMove(0, -1) &WindowResizeTo(0, -100)
              key RShift = &WindowMoveTo(NE, 3, 4)
-             key LControl = &Ignore &Undefined",
-        );
-        let g = global(&c);
-        let o = Target::Overlapped;
+             key LControl = &Ignore &Undefined";
+
+    #[test]
+    fn window_move_reads_the_offsets() {
+        // key A = &WindowMove(-16, 0)
+        let c = load_ok(WINFUNC_SRC);
         assert_eq!(
-            only(g, A).actions,
+            only(global(&c), A).actions,
             vec![Action::Func(Func::WindowMove {
                 dx: -16,
                 dy: 0,
-                target: o
+                target: Target::Overlapped
             })]
         );
+    }
+
+    #[test]
+    fn window_move_reads_the_target() {
+        // key B = &WindowMove(1, 2, MDI)
+        let c = load_ok(WINFUNC_SRC);
         assert_eq!(
-            only(g, B).actions,
+            only(global(&c), B).actions,
             vec![Action::Func(Func::WindowMove {
                 dx: 1,
                 dy: 2,
                 target: Target::Mdi
             })]
         );
+    }
+
+    #[test]
+    fn omitted_target_is_the_overlapped_window() {
+        // key H = &WindowLower &WindowRaise(mdi) &WindowMaximize
+        let c = load_ok(WINFUNC_SRC);
         assert_eq!(
-            only(g, H).actions,
+            only(global(&c), H).actions,
             vec![
-                Action::Func(Func::WindowLower(o)),
+                Action::Func(Func::WindowLower(Target::Overlapped)),
                 Action::Func(Func::WindowRaise(Target::Mdi)),
-                Action::Func(Func::WindowMaximize(o)),
+                Action::Func(Func::WindowMaximize(Target::Overlapped)),
             ]
         );
+    }
+
+    #[test]
+    fn window_cling_to_is_window_move_to_with_zero_offsets() {
+        // key Space = &WindowClingToLeft &WindowClingToBottom(MDI)
+        let c = load_ok(WINFUNC_SRC);
         assert_eq!(
-            only(g, SPACE).actions,
+            only(global(&c), SPACE).actions,
             vec![
                 Action::Func(Func::WindowMoveTo {
                     gravity: Gravity::West,
                     dx: 0,
                     dy: 0,
-                    target: o
+                    target: Target::Overlapped
                 }),
                 Action::Func(Func::WindowMoveTo {
                     gravity: Gravity::South,
@@ -2452,8 +2837,14 @@ keymap Sub : Global"
                 }),
             ]
         );
+    }
+
+    #[test]
+    fn functions_can_be_lined_up_without_parentheses() {
+        // key BackSpace = &WindowSetAlpha(70) &WindowToggleTopMost &WindowRedraw &Recenter
+        let c = load_ok(WINFUNC_SRC);
         assert_eq!(
-            only(g, BS).actions,
+            only(global(&c), BS).actions,
             vec![
                 Action::Func(Func::WindowSetAlpha(70)),
                 Action::Func(Func::WindowToggleTopMost),
@@ -2461,80 +2852,156 @@ keymap Sub : Global"
                 Action::Func(Func::Recenter),
             ]
         );
+    }
+
+    #[test]
+    fn number_arguments_can_be_zero_or_negative() {
+        // key LShift = &MouseMove(0, -1) &WindowResizeTo(0, -100)
+        let c = load_ok(WINFUNC_SRC);
         assert_eq!(
-            only(g, LSHIFT).actions,
+            only(global(&c), LSHIFT).actions,
             vec![
                 Action::Func(Func::MouseMove { dx: 0, dy: -1 }),
                 Action::Func(Func::WindowResizeTo {
                     width: 0,
                     height: -100,
-                    target: o
+                    target: Target::Overlapped
                 }),
             ]
         );
+    }
+
+    #[test]
+    fn window_move_to_reads_the_gravity() {
+        // key RShift = &WindowMoveTo(NE, 3, 4)
+        let c = load_ok(WINFUNC_SRC);
         assert_eq!(
-            only(g, RSHIFT).actions,
+            only(global(&c), RSHIFT).actions,
             vec![Action::Func(Func::WindowMoveTo {
                 gravity: Gravity::NorthEast,
                 dx: 3,
                 dy: 4,
-                target: o
+                target: Target::Overlapped
             })]
         );
+    }
+
+    #[test]
+    fn ignore_and_undefined_are_read() {
+        // key LControl = &Ignore &Undefined
+        let c = load_ok(WINFUNC_SRC);
         assert_eq!(
-            only(g, LCONTROL).actions,
+            only(global(&c), LCONTROL).actions,
             vec![Action::Ignore, Action::Func(Func::Undefined)]
         );
+    }
+
+    #[test]
+    fn undefined_takes_no_argument() {
         assert!(
             load_err("key A = &Undefined(1)")
                 .message
                 .contains("引数が多い")
         );
+    }
+
+    #[test]
+    fn window_move_needs_arguments() {
         assert!(load_err("key A = &WindowMove").message.contains("引数"));
+    }
+
+    #[test]
+    fn window_move_needs_two_numbers() {
         assert!(load_err("key A = &WindowMove(1)").message.contains("引数"));
+    }
+
+    #[test]
+    fn window_move_takes_at_most_three_arguments() {
         assert!(
             load_err("key A = &WindowMove(1, 2, MDI, 4)")
                 .message
                 .contains("引数が多い")
         );
+    }
+
+    #[test]
+    fn window_move_offset_must_be_a_number() {
         assert!(load_err("key A = &WindowMove(a, 2)").message.contains("数"));
+    }
+
+    #[test]
+    fn unknown_target_is_an_error() {
         assert!(
             load_err("key A = &WindowLower(Foo)")
                 .message
                 .contains("overlapped")
         );
+    }
+
+    #[test]
+    fn missing_close_parenthesis_is_an_error() {
         assert!(load_err("key A = &MouseMove(1, 2").message.contains("`)`"));
+    }
+
+    #[test]
+    fn mouse_wheel_reads_the_delta() {
+        // key A = &MouseWheel(-120)
         let c = load_ok("key A = &MouseWheel(-120)");
         assert_eq!(
             only(global(&c), A).actions,
             vec![Action::Func(Func::MouseWheel(-120))]
         );
+    }
+
+    #[test]
+    fn mouse_wheel_takes_one_argument() {
         assert!(
             load_err("key A = &MouseWheel(1, 2)")
                 .message
                 .contains("引数が多い")
         );
-        // 空の引数は、数なら 0。yamy と同じく `()` は空の引数 1 個
+    }
+
+    #[test]
+    fn empty_number_argument_is_zero() {
+        // key A = &MouseMove(, 2)
         let c = load_ok("key A = &MouseMove(, 2)");
         assert_eq!(
             only(global(&c), A).actions,
             vec![Action::Func(Func::MouseMove { dx: 0, dy: 2 })]
         );
+    }
+
+    #[test]
+    fn empty_argument_in_the_middle_is_counted() {
         assert!(
             load_err("key A = &MouseMove(1,, 2)")
                 .message
                 .contains("引数が多い")
         );
+    }
+
+    #[test]
+    fn empty_parentheses_are_one_argument_for_window_redraw() {
+        // yamy と同じく `()` は空の引数 1 個
         assert!(
             load_err("key A = &WindowRedraw()")
                 .message
                 .contains("引数が多い")
         );
+    }
+
+    #[test]
+    fn empty_parentheses_are_one_argument_for_recenter() {
         assert!(
             load_err("key A = &Recenter()")
                 .message
                 .contains("引数が多い")
         );
+    }
+
+    #[test]
+    fn empty_target_is_an_error() {
         assert!(
             load_err("key A = &WindowMaximize()")
                 .message
@@ -2543,13 +3010,18 @@ keymap Sub : Global"
     }
 
     #[test]
-    fn keymap_window_and_clipboard_case() {
-        let c =
-            load_ok("key A = &KeymapWindow\nkey B = &ClipboardUpcaseWord &clipboarddowncaseword");
-        let g = global(&c);
-        assert_eq!(only(g, A).actions, vec![Action::KeymapWindow]);
+    fn keymap_window_is_read() {
+        // key A = &KeymapWindow
+        let c = load_ok("key A = &KeymapWindow");
+        assert_eq!(only(global(&c), A).actions, vec![Action::KeymapWindow]);
+    }
+
+    #[test]
+    fn clipboard_case_functions_are_read() {
+        // key B = &ClipboardUpcaseWord &clipboarddowncaseword
+        let c = load_ok("key B = &ClipboardUpcaseWord &clipboarddowncaseword");
         assert_eq!(
-            only(g, B).actions,
+            only(global(&c), B).actions,
             vec![
                 Action::Func(Func::ClipboardUpcaseWord),
                 Action::Func(Func::ClipboardDowncaseWord)
@@ -2557,49 +3029,125 @@ keymap Sub : Global"
         );
     }
 
+    // ---- &HelpMessage / &HelpVariable ---------------------------------------
+
+    const HELP_SRC: &str = concat!(
+        "key A = &HelpMessage(\"EmacsEdit C-x-\", \"C-x u\\tundo\")\n",
+        "key B = &HelpMessage &HelpMessage() &HelpMessage(\"\", \"\")\n",
+        "key H = &HelpMessage(\"T\")\n",
+        "key Space = &HelpVariable(\"繰り返し\")\n",
+        // 引用符の無い名前も文字列
+        "key LShift = &HelpMessage(Mayu, \"再読込完了\")\n",
+        // 並んだ文字列は行継続をまたいでもつなぐ
+        "key BS = &HelpMessage(\"KeyMap\", \\\n \" 1 : a\\n\" \\\n \" 2 : b\" \\\n )\n",
+        // 空の引数は空の文字列
+        "key RShift = &HelpMessage(\"KeyMap\", \\\n )\n",
+        "key LControl = &HelpVariable()\n",
+    );
+
+    fn help(title: &str, body: &str) -> Action {
+        Action::HelpMessage(Some(HelpText {
+            title: title.into(),
+            body: body.into(),
+        }))
+    }
+
     #[test]
-    fn help_message_and_variable() {
-        let c = load_ok(concat!(
-            "key A = &HelpMessage(\"EmacsEdit C-x-\", \"C-x u\\tundo\")\n",
-            "key B = &HelpMessage &HelpMessage() &HelpMessage(\"\", \"\")\n",
-            "key H = &HelpMessage(\"T\")\n",
-            "key Space = &HelpVariable(\"繰り返し\")\n",
-            // 引用符の無い名前も文字列
-            "key LShift = &HelpMessage(Mayu, \"再読込完了\")\n",
-            // 並んだ文字列は行継続をまたいでもつなぐ
-            "key BS = &HelpMessage(\"KeyMap\", \\\n \" 1 : a\\n\" \\\n \" 2 : b\" \\\n )\n",
-            // 空の引数は空の文字列
-            "key RShift = &HelpMessage(\"KeyMap\", \\\n )\n",
-            "key LControl = &HelpVariable()\n",
-        ));
-        let g = global(&c);
-        let text = |t: &str, b: &str| {
-            Action::HelpMessage(Some(HelpText {
-                title: t.into(),
-                body: b.into(),
-            }))
-        };
+    fn help_message_reads_the_title_and_the_body() {
+        // key A = &HelpMessage("EmacsEdit C-x-", "C-x u\tundo")
+        let c = load_ok(HELP_SRC);
         assert_eq!(
-            only(g, A).actions,
-            vec![text("EmacsEdit C-x-", "C-x u\tundo")]
+            only(global(&c), A).actions,
+            vec![help("EmacsEdit C-x-", "C-x u\tundo")]
         );
-        assert_eq!(only(g, B).actions, vec![Action::HelpMessage(None); 3]);
-        assert_eq!(only(g, H).actions, vec![text("T", "")]);
+    }
+
+    #[test]
+    fn help_message_without_text_hides() {
+        // key B = &HelpMessage &HelpMessage() &HelpMessage("", "")
+        let c = load_ok(HELP_SRC);
         assert_eq!(
-            only(g, SPACE).actions,
+            only(global(&c), B).actions,
+            vec![Action::HelpMessage(None); 3]
+        );
+    }
+
+    #[test]
+    fn help_message_with_only_a_title_has_an_empty_body() {
+        // key H = &HelpMessage("T")
+        let c = load_ok(HELP_SRC);
+        assert_eq!(only(global(&c), H).actions, vec![help("T", "")]);
+    }
+
+    #[test]
+    fn help_variable_reads_the_title() {
+        // key Space = &HelpVariable("繰り返し")
+        let c = load_ok(HELP_SRC);
+        assert_eq!(
+            only(global(&c), SPACE).actions,
             vec![Action::HelpVariable("繰り返し".into())]
         );
-        assert_eq!(only(g, LSHIFT).actions, vec![text("Mayu", "再読込完了")]);
-        assert_eq!(only(g, BS).actions, vec![text("KeyMap", " 1 : a\n 2 : b")]);
-        assert_eq!(only(g, RSHIFT).actions, vec![text("KeyMap", "")]);
+    }
+
+    #[test]
+    fn unquoted_name_is_a_string() {
+        // key LShift = &HelpMessage(Mayu, "再読込完了")
+        let c = load_ok(HELP_SRC);
         assert_eq!(
-            only(g, LCONTROL).actions,
+            only(global(&c), LSHIFT).actions,
+            vec![help("Mayu", "再読込完了")]
+        );
+    }
+
+    #[test]
+    fn adjacent_strings_are_joined_across_continuation_lines() {
+        let c = load_ok(HELP_SRC);
+        assert_eq!(
+            only(global(&c), BS).actions,
+            vec![help("KeyMap", " 1 : a\n 2 : b")]
+        );
+    }
+
+    #[test]
+    fn empty_string_argument_is_an_empty_string() {
+        let c = load_ok(HELP_SRC);
+        assert_eq!(only(global(&c), RSHIFT).actions, vec![help("KeyMap", "")]);
+    }
+
+    #[test]
+    fn help_variable_with_empty_parentheses_has_an_empty_title() {
+        // key LControl = &HelpVariable()
+        let c = load_ok(HELP_SRC);
+        assert_eq!(
+            only(global(&c), LCONTROL).actions,
             vec![Action::HelpVariable(String::new())]
         );
     }
 
     #[test]
-    fn shell_execute() {
+    fn help_message_title_must_be_a_string() {
+        load_err("key A = &HelpMessage(1)");
+    }
+
+    #[test]
+    fn help_message_takes_at_most_two_arguments() {
+        load_err("key A = &HelpMessage(\"a\", \"b\", \"c\")");
+    }
+
+    #[test]
+    fn help_variable_needs_parentheses() {
+        load_err("key A = &HelpVariable");
+    }
+
+    #[test]
+    fn help_variable_takes_one_argument() {
+        load_err("key A = &HelpVariable(\"a\", \"b\")");
+    }
+
+    // ---- &ShellExecute ------------------------------------------------------
+
+    #[test]
+    fn shell_execute_reads_five_arguments() {
         let c = load_ok("key A = &ShellExecute(open, \"notepad.exe\", \"a b\", , showMaximized)");
         assert_eq!(
             only(global(&c), A).actions,
@@ -2611,80 +3159,156 @@ keymap Sub : Global"
                 show: ShowCommand::ShowMaximized,
             })]
         );
+    }
+
+    #[test]
+    fn shell_execute_needs_a_show_command() {
         assert!(
             load_err("key A = &ShellExecute(open, \"a\", , )")
                 .message
                 .contains("窓の出し方")
         );
+    }
+
+    #[test]
+    fn shell_execute_needs_the_third_argument() {
         assert!(
             load_err("key A = &ShellExecute(open, \"a\")")
                 .message
                 .contains("3 番目")
         );
+    }
+
+    #[test]
+    fn shell_execute_with_an_unknown_show_command_is_an_error() {
         assert!(
             load_err("key A = &ShellExecute(open, \"a\", , , Big)")
                 .message
                 .contains("窓の出し方が不明")
         );
-        load_err("key A = &ShellExecute(open, $Clipboard, , , ShowNormal)");
-        load_err("key A = &ShellExecute(open, \"a\", , , ShowNormal, 1)");
     }
 
     #[test]
-    fn describe_text_is_made_while_loading() {
-        let c = load_ok(
-            "keyseq $Seq = C-BS\n\
+    fn shell_execute_does_not_read_argument_substitution() {
+        load_err("key A = &ShellExecute(open, $Clipboard, , , ShowNormal)");
+    }
+
+    #[test]
+    fn shell_execute_takes_at_most_five_arguments() {
+        load_err("key A = &ShellExecute(open, \"a\", , , ShowNormal, 1)");
+    }
+
+    // ---- &DescribeBindings の文字列 -------------------------------------------
+
+    const DESCRIBE_SRC: &str = "keyseq $Seq = C-BS\n\
              keymap Sub = &Ignore\n\
              keymap Global\n\
              key A = *BS $Seq ( H Space ) &WindowClingToLeft &Repeat($Seq) &DescribeBindings\n\
              key B = &EmacsEditKillLinePred(( H ), $Seq) &Prefix(Sub)\n\
-             event prefixed = &Sync",
-        );
-        let g = global(&c);
+             event prefixed = &Sync";
+
+    #[test]
+    fn describe_text_of_an_assignment_is_made_while_loading() {
+        let c = load_ok(DESCRIBE_SRC);
         assert_eq!(
-            only(g, A).text,
+            only(global(&c), A).text,
             "BackSpace $Seq $ &WindowClingToLeft(overlapped)  &Repeat($Seq, 10)  &DescribeBindings "
         );
-        assert_eq!(
-            only(g, B).text,
-            "&EmacsEditKillLinePred($, $Seq)  &Prefix(Sub, true)  "
-        );
-        assert_eq!(g.event_texts[EventKind::Prefixed.index()], "&Sync ");
-        assert_eq!(c.keymaps[1].default_text, "&Ignore ");
-        assert_eq!(global(&c).default_text, "&OtherWindowClass ");
-        // キーの名前は def key の最初の名前
-        assert_eq!(c.key_name(BS), "BackSpace");
-        assert_eq!(only(g, A).actions.last(), Some(&Action::DescribeBindings));
     }
 
     #[test]
-    fn investigate_and_load_setting() {
-        let c = load_ok(
-            "key A = &WindowIdentify &MayuDialog(Log, SHOW)\n\
-             key B = &InvestigateCommand\n\
-             key H = &LoadSetting &LoadSetting(\"109 Emacs\")",
-        );
-        let g = global(&c);
+    fn describe_text_names_the_sequence_arguments() {
+        let c = load_ok(DESCRIBE_SRC);
         assert_eq!(
-            only(g, A).actions,
+            only(global(&c), B).text,
+            "&EmacsEditKillLinePred($, $Seq)  &Prefix(Sub, true)  "
+        );
+    }
+
+    #[test]
+    fn describe_text_of_an_event_is_made_while_loading() {
+        let c = load_ok(DESCRIBE_SRC);
+        assert_eq!(
+            global(&c).event_texts[EventKind::Prefixed.index()],
+            "&Sync "
+        );
+    }
+
+    #[test]
+    fn describe_text_of_a_default_action_is_made_while_loading() {
+        let c = load_ok(DESCRIBE_SRC);
+        assert_eq!(c.keymaps[1].default_text, "&Ignore ");
+        assert_eq!(global(&c).default_text, "&OtherWindowClass ");
+    }
+
+    #[test]
+    fn key_name_is_the_first_name_of_def_key() {
+        let c = load_ok(DESCRIBE_SRC);
+        assert_eq!(c.key_name(BS), "BackSpace");
+    }
+
+    #[test]
+    fn describe_bindings_is_read() {
+        let c = load_ok(DESCRIBE_SRC);
+        assert_eq!(
+            only(global(&c), A).actions.last(),
+            Some(&Action::DescribeBindings)
+        );
+    }
+
+    // ---- 調査・設定・ログ --------------------------------------------------------
+
+    const INVESTIGATE_SRC: &str = "key A = &WindowIdentify &MayuDialog(Log, SHOW)\n\
+             key B = &InvestigateCommand\n\
+             key H = &LoadSetting &LoadSetting(\"109 Emacs\")";
+
+    #[test]
+    fn window_identify_is_read() {
+        // key A = &WindowIdentify &MayuDialog(Log, SHOW)
+        let c = load_ok(INVESTIGATE_SRC);
+        assert_eq!(
+            only(global(&c), A).actions,
             vec![
                 Action::Func(Func::WindowIdentify),
                 Action::MayuDialog(ShowCommand::Show)
             ]
         );
-        assert_eq!(only(g, B).actions, vec![Action::InvestigateCommand]);
+    }
+
+    #[test]
+    fn investigate_command_is_read() {
+        // key B = &InvestigateCommand
+        let c = load_ok(INVESTIGATE_SRC);
         assert_eq!(
-            only(g, H).actions,
+            only(global(&c), B).actions,
+            vec![Action::InvestigateCommand]
+        );
+    }
+
+    #[test]
+    fn load_setting_reads_an_optional_name() {
+        // key H = &LoadSetting &LoadSetting("109 Emacs")
+        let c = load_ok(INVESTIGATE_SRC);
+        assert_eq!(
+            only(global(&c), H).actions,
             vec![
                 Action::LoadSetting(String::new()),
                 Action::LoadSetting("109 Emacs".into())
             ]
         );
+    }
+
+    #[test]
+    fn load_setting_takes_at_most_one_argument() {
         assert!(
             load_err("key A = &LoadSetting(a, b)")
                 .message
                 .contains("引数が多い")
         );
+    }
+
+    #[test]
+    fn window_identify_takes_no_argument() {
         assert!(
             load_err("key A = &WindowIdentify()")
                 .message
@@ -2692,52 +3316,78 @@ keymap Sub : Global"
         );
     }
 
-    #[test]
-    fn mayu_dialog_and_log_clear() {
-        let c = load_ok(
-            "key A = &MayuDialog(Log, showNormal)\n\
+    const DIALOG_SRC: &str = "key A = &MayuDialog(Log, showNormal)\n\
              key B = &mayudialog(LOG, Hide)\n\
-             key H = &LogClear",
-        );
-        let g = global(&c);
+             key H = &LogClear";
+
+    #[test]
+    fn mayu_dialog_reads_the_show_command() {
+        // key A = &MayuDialog(Log, showNormal)
+        let c = load_ok(DIALOG_SRC);
         assert_eq!(
-            only(g, A).actions,
+            only(global(&c), A).actions,
             vec![Action::MayuDialog(ShowCommand::ShowNormal)]
         );
+    }
+
+    #[test]
+    fn mayu_dialog_ignores_case() {
+        // key B = &mayudialog(LOG, Hide)
+        let c = load_ok(DIALOG_SRC);
         assert_eq!(
-            only(g, B).actions,
+            only(global(&c), B).actions,
             vec![Action::MayuDialog(ShowCommand::Hide)]
         );
-        assert_eq!(only(g, H).actions, vec![Action::LogClear]);
+    }
+
+    #[test]
+    fn log_clear_is_read() {
+        // key H = &LogClear
+        let c = load_ok(DIALOG_SRC);
+        assert_eq!(only(global(&c), H).actions, vec![Action::LogClear]);
+    }
+
+    #[test]
+    fn mayu_dialog_investigate_is_not_supported() {
         assert!(
             load_err("key A = &MayuDialog(Investigate, Show)")
                 .message
                 .contains("未対応")
         );
+    }
+
+    #[test]
+    fn mayu_dialog_with_an_unknown_dialog_is_an_error() {
         assert!(
             load_err("key A = &MayuDialog(Foo, Show)")
                 .message
                 .contains("ダイアログが不明")
         );
+    }
+
+    #[test]
+    fn mayu_dialog_needs_a_show_command() {
         assert!(
             load_err("key A = &MayuDialog(Log)")
                 .message
                 .contains("窓の出し方")
         );
+    }
+
+    #[test]
+    fn mayu_dialog_needs_a_dialog_name() {
         load_err("key A = &MayuDialog()");
+    }
+
+    #[test]
+    fn mayu_dialog_takes_at_most_two_arguments() {
         load_err("key A = &MayuDialog(Log, Show, 1)");
     }
 
-    #[test]
-    fn help_errors() {
-        load_err("key A = &HelpMessage(1)");
-        load_err("key A = &HelpMessage(\"a\", \"b\", \"c\")");
-        load_err("key A = &HelpVariable");
-        load_err("key A = &HelpVariable(\"a\", \"b\")");
-    }
+    // ---- &EmacsEditKillLine… / &Sync / &EditNextModifier / &Prefix ------------
 
     #[test]
-    fn emacs_edit_kill_line() {
+    fn emacs_edit_kill_line_reads_two_sequences() {
         let c = load_ok(
             "keyseq $Del = BS
              key A = &EmacsEditKillLineFunc &EmacsEditKillLinePred($Del, (Space H))",
@@ -2752,11 +3402,19 @@ keymap Sub : Global"
                 },
             ]
         );
+    }
+
+    #[test]
+    fn emacs_edit_kill_line_pred_needs_two_sequences() {
         assert!(
             load_err("key A = &EmacsEditKillLinePred((BS))")
                 .message
                 .contains("`,`")
         );
+    }
+
+    #[test]
+    fn emacs_edit_kill_line_pred_argument_must_be_a_sequence() {
         assert!(
             load_err("key A = &EmacsEditKillLinePred(BS, (H))")
                 .message
@@ -2765,44 +3423,75 @@ keymap Sub : Global"
     }
 
     #[test]
-    fn def_sync_and_sync_function() {
+    fn def_sync_reads_the_scan_code() {
+        // def sync = E0-0x7e
         let c = load_ok("def sync = E0-0x7e\nkey A = &Sync &WindowMaximize");
         assert_eq!(c.sync, Some(Key::e0(0x7e)));
+    }
+
+    #[test]
+    fn sync_is_read() {
+        // key A = &Sync &WindowMaximize
+        let c = load_ok("def sync = E0-0x7e\nkey A = &Sync &WindowMaximize");
         assert_eq!(only(global(&c), A).actions[0], Action::Sync);
+    }
+
+    #[test]
+    fn sync_key_is_none_without_def_sync() {
         let c = load_ok("key A = &Sync");
         assert_eq!(c.sync, None);
     }
 
-    #[test]
-    fn edit_next_modifier() {
-        let c = load_ok(
-            "key A = &EditNextModifier(M-)
+    const EDIT_NEXT_SRC: &str = "key A = &EditNextModifier(M-)
              key B = &EditNextModifier(~S-C-IC-)
-             key H = &EditNextModifier()",
-        );
-        let g = global(&c);
-        let any = LockSpec::any();
+             key H = &EditNextModifier()";
+
+    #[test]
+    fn edit_next_modifier_reads_a_modifier() {
+        // key A = &EditNextModifier(M-)
+        let c = load_ok(EDIT_NEXT_SRC);
         assert_eq!(
-            only(g, A).actions,
+            only(global(&c), A).actions,
             vec![Action::EditNextModifier(
                 ModSpec::any().with(BasicMod::Alt),
-                any
+                LockSpec::any()
             )]
         );
+    }
+
+    #[test]
+    fn edit_next_modifier_reads_release_and_lock_prefixes() {
+        // key B = &EditNextModifier(~S-C-IC-)
+        let c = load_ok(EDIT_NEXT_SRC);
         assert_eq!(
-            only(g, B).actions,
+            only(global(&c), B).actions,
             vec![Action::EditNextModifier(
                 ModSpec::any()
                     .without(BasicMod::Shift)
                     .with(BasicMod::Control),
-                any.with(LockMod::ImeComp)
+                LockSpec::any().with(LockMod::ImeComp)
             )]
         );
+    }
+
+    #[test]
+    fn edit_next_modifier_without_a_modifier_changes_nothing() {
+        // key H = &EditNextModifier()
+        let c = load_ok(EDIT_NEXT_SRC);
         assert_eq!(
-            only(g, H).actions,
-            vec![Action::EditNextModifier(ModSpec::any(), any)]
+            only(global(&c), H).actions,
+            vec![Action::EditNextModifier(ModSpec::any(), LockSpec::any())]
         );
-        assert_eq!(only(g, A).text, "&EditNextModifier(A-)  ");
+    }
+
+    #[test]
+    fn describe_text_of_edit_next_modifier_uses_a_for_alt() {
+        let c = load_ok(EDIT_NEXT_SRC);
+        assert_eq!(only(global(&c), A).text, "&EditNextModifier(A-)  ");
+    }
+
+    #[test]
+    fn edit_next_modifier_argument_must_be_a_modifier() {
         assert!(
             load_err("key A = &EditNextModifier(Foo)")
                 .to_string()
@@ -2810,27 +3499,43 @@ keymap Sub : Global"
         );
     }
 
-    #[test]
-    fn prefix_ignore_modifiers() {
-        let c = load_ok(
-            "keymap Sub
+    const PREFIX_SRC: &str = "keymap Sub
              key A = &Prefix(Sub, False)
              key B = &Prefix(Sub, true)
-             key H = &Prefix(Sub)",
-        );
-        let sub = &c.keymaps[1];
+             key H = &Prefix(Sub)";
+
+    #[test]
+    fn prefix_reads_false_ignoring_case() {
+        // key A = &Prefix(Sub, False)
+        let c = load_ok(PREFIX_SRC);
         assert_eq!(
-            only(sub, A).actions,
+            only(&c.keymaps[1], A).actions,
             vec![Action::Prefix(KeymapId(1), false)]
         );
+    }
+
+    #[test]
+    fn prefix_reads_true() {
+        // key B = &Prefix(Sub, true)
+        let c = load_ok(PREFIX_SRC);
         assert_eq!(
-            only(sub, B).actions,
+            only(&c.keymaps[1], B).actions,
             vec![Action::Prefix(KeymapId(1), true)]
         );
+    }
+
+    #[test]
+    fn prefix_ignore_modifiers_defaults_to_true() {
+        // key H = &Prefix(Sub)
+        let c = load_ok(PREFIX_SRC);
         assert_eq!(
-            only(sub, H).actions,
+            only(&c.keymaps[1], H).actions,
             vec![Action::Prefix(KeymapId(1), true)]
         );
+    }
+
+    #[test]
+    fn prefix_ignore_modifiers_must_be_true_or_false() {
         assert!(
             load_err(
                 "keymap Sub
@@ -2841,37 +3546,62 @@ key A = &Prefix(Sub, yes)"
         );
     }
 
-    #[test]
-    fn event_variable_and_repeat() {
-        let c = load_ok(
-            "keyseq $seq = Space
+    // ---- event / &Variable / &Repeat ----------------------------------------
+
+    const EVENT_SRC: &str = "keyseq $seq = Space
              keymap Sub
              event prefixed = H
              event Before-Key-Down = B
              key A = &Variable(10, 3) &Prefix(Sub)
              key B = &Repeat((H), 100) &Variable(0, 0)
-             key H = &Repeat($seq)",
-        );
-        let sub = &c.keymaps[1];
+             key H = &Repeat($seq)";
+
+    #[test]
+    fn event_prefixed_is_read() {
+        // event prefixed = H
+        let c = load_ok(EVENT_SRC);
         assert_eq!(
-            sub.event(EventKind::Prefixed),
+            c.keymaps[1].event(EventKind::Prefixed),
             Some(&[Action::key_with(H, base())][..])
         );
+    }
+
+    #[test]
+    fn event_name_ignores_case() {
+        // event Before-Key-Down = B
+        let c = load_ok(EVENT_SRC);
         assert_eq!(
-            sub.event(EventKind::BeforeKeyDown),
+            c.keymaps[1].event(EventKind::BeforeKeyDown),
             Some(&[Action::key_with(B, base())][..])
         );
-        assert_eq!(sub.event(EventKind::AfterKeyUp), None);
+    }
+
+    #[test]
+    fn event_that_is_not_written_is_none() {
+        let c = load_ok(EVENT_SRC);
+        assert_eq!(c.keymaps[1].event(EventKind::AfterKeyUp), None);
         assert_eq!(global(&c).event(EventKind::Prefixed), None);
+    }
+
+    #[test]
+    fn variable_reads_mag_and_inc() {
+        // key A = &Variable(10, 3) &Prefix(Sub)
+        let c = load_ok(EVENT_SRC);
         assert_eq!(
-            only(sub, A).actions,
+            only(&c.keymaps[1], A).actions,
             vec![
                 Action::Variable { mag: 10, inc: 3 },
                 Action::Prefix(KeymapId(1), true)
             ]
         );
+    }
+
+    #[test]
+    fn repeat_reads_the_sequence_and_the_max() {
+        // key B = &Repeat((H), 100) &Variable(0, 0)
+        let c = load_ok(EVENT_SRC);
         assert_eq!(
-            only(sub, B).actions,
+            only(&c.keymaps[1], B).actions,
             vec![
                 Action::Repeat {
                     actions: vec![Action::key_with(H, base())],
@@ -2880,23 +3610,41 @@ key A = &Prefix(Sub, yes)"
                 Action::Variable { mag: 0, inc: 0 }
             ]
         );
+    }
+
+    #[test]
+    fn repeat_max_defaults_to_10() {
+        // key H = &Repeat($seq)
+        let c = load_ok(EVENT_SRC);
         assert_eq!(
-            only(sub, H).actions,
+            only(&c.keymaps[1], H).actions,
             vec![Action::Repeat {
                 actions: vec![in_keyseq(SPACE, base())],
                 max: 10
             }]
         );
+    }
+
+    #[test]
+    fn unknown_event_is_an_error() {
         assert!(
             load_err("event foo = A")
                 .to_string()
                 .contains("知らない event")
         );
+    }
+
+    #[test]
+    fn repeat_argument_must_be_a_sequence() {
         assert!(
             load_err("key A = &Repeat(A)")
                 .to_string()
                 .contains("&Repeat の 1 番目")
         );
+    }
+
+    #[test]
+    fn variable_needs_two_arguments() {
         assert!(
             load_err("key A = &Variable(1)")
                 .to_string()
@@ -2904,17 +3652,19 @@ key A = &Prefix(Sub, yes)"
         );
     }
 
-    #[test]
-    fn vk_and_post_message() {
-        let c = load_ok(
-            "key A = &VK(RButton)
+    // ---- &VK / &PostMessage -------------------------------------------------
+
+    const VK_SRC: &str = "key A = &VK(RButton)
              key B = &VK(E-D-Return) &VK(U-0x41)
              key H = &PostMessage(ToItself, 277, 2, 0)
-             key Space = &PostMessage(toMainWindow, 273, 41525, -1)",
-        );
-        let g = global(&c);
+             key Space = &PostMessage(toMainWindow, 273, 41525, -1)";
+
+    #[test]
+    fn vk_reads_a_virtual_key_name() {
+        // key A = &VK(RButton)
+        let c = load_ok(VK_SRC);
         assert_eq!(
-            only(g, A).actions,
+            only(global(&c), A).actions,
             vec![Action::Vk {
                 vk: 0x02,
                 extended: false,
@@ -2922,8 +3672,14 @@ key A = &Prefix(Sub, yes)"
                 up: true
             }]
         );
+    }
+
+    #[test]
+    fn vk_reads_e_d_u_prefixes_and_a_number() {
+        // key B = &VK(E-D-Return) &VK(U-0x41)
+        let c = load_ok(VK_SRC);
         assert_eq!(
-            only(g, B).actions,
+            only(global(&c), B).actions,
             vec![
                 Action::Vk {
                     vk: 0x0d,
@@ -2939,8 +3695,14 @@ key A = &Prefix(Sub, yes)"
                 },
             ]
         );
+    }
+
+    #[test]
+    fn post_message_reads_its_arguments() {
+        // key H = &PostMessage(ToItself, 277, 2, 0)
+        let c = load_ok(VK_SRC);
         assert_eq!(
-            only(g, H).actions,
+            only(global(&c), H).actions,
             vec![Action::Func(Func::PostMessage {
                 to: ToWindow::Itself,
                 message: 277,
@@ -2948,8 +3710,14 @@ key A = &Prefix(Sub, yes)"
                 lparam: 0
             })]
         );
+    }
+
+    #[test]
+    fn post_message_target_ignores_case() {
+        // key Space = &PostMessage(toMainWindow, 273, 41525, -1)
+        let c = load_ok(VK_SRC);
         assert_eq!(
-            only(g, SPACE).actions,
+            only(global(&c), SPACE).actions,
             vec![Action::Func(Func::PostMessage {
                 to: ToWindow::Main,
                 message: 273,
@@ -2957,18 +3725,38 @@ key A = &Prefix(Sub, yes)"
                 lparam: -1
             })]
         );
+    }
+
+    #[test]
+    fn vk_with_an_unknown_name_is_an_error() {
         assert!(
             load_err("key A = &VK(Nothing)")
                 .message
                 .contains("仮想キー名")
         );
+    }
+
+    #[test]
+    fn vk_number_must_be_0_to_255() {
         assert!(load_err("key A = &VK(300)").message.contains("0〜255"));
+    }
+
+    #[test]
+    fn vk_needs_parentheses() {
         assert!(load_err("key A = &VK").message.contains("`(`"));
+    }
+
+    #[test]
+    fn post_message_needs_four_arguments() {
         assert!(
             load_err("key A = &PostMessage(ToItself, 1, 2)")
                 .message
                 .contains("無い")
         );
+    }
+
+    #[test]
+    fn post_message_with_an_unknown_target_is_an_error() {
         assert!(
             load_err("key A = &PostMessage(Nowhere, 1, 2, 3)")
                 .message
@@ -2978,6 +3766,7 @@ key A = &Prefix(Sub, yes)"
 
     #[test]
     fn later_assignment_wins() {
+        // key A = B / key A = H
         let c = load_ok("key A = B\nkey A = H");
         let g = global(&c);
         let found = g
@@ -2987,90 +3776,111 @@ key A = &Prefix(Sub, yes)"
         assert_eq!(g.assignments.len(), 1);
     }
 
+    // ---- ファイルを読ませる（Medium） --------------------------------------------
+
     #[test]
-    fn include_and_encoding() {
-        let dir = std::env::temp_dir().join(format!("newmayu-parser-{}", std::process::id()));
-        let sub = dir.join("sub");
-        std::fs::create_dir_all(&sub).unwrap();
-        std::fs::write(
-            dir.join("top.mayu"),
-            format!("{KEYS}\ninclude \"sub/inner.mayu\"\nkey H = B\n"),
+    fn include_reads_the_file_relative_to_the_including_file() {
+        let top = format!("{KEYS}\ninclude \"sub/inner.mayu\"\nkey H = B\n");
+        let c = load_files(
+            "include",
+            &[
+                ("top.mayu", top.as_bytes()),
+                ("sub/inner.mayu", b"key A = B\n"),
+            ],
+            &[],
         )
         .unwrap();
-        std::fs::write(sub.join("inner.mayu"), "key A = B\n").unwrap();
-        let c = load(&dir.join("top.mayu"), &[]).unwrap();
         let g = global(&c);
         assert_eq!(g.assignments.len(), 2);
         assert_eq!(only(g, A).actions.len(), 1);
+    }
 
-        // include 先のエラーは include 先のファイル名と行で出る
-        std::fs::write(sub.join("inner.mayu"), "key A = B\n\nkey Z = B\n").unwrap();
-        let e = load(&dir.join("top.mayu"), &[]).unwrap_err();
+    #[test]
+    fn error_in_an_included_file_names_that_file_and_line() {
+        let top = format!("{KEYS}\ninclude \"sub/inner.mayu\"\nkey H = B\n");
+        let e = load_files(
+            "include-error",
+            &[
+                ("top.mayu", top.as_bytes()),
+                ("sub/inner.mayu", b"key A = B\n\nkey Z = B\n"),
+            ],
+            &[],
+        )
+        .unwrap_err();
         assert!(e.file.ends_with("inner.mayu"), "{e}");
         assert_eq!(e.line, 3);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn symbols_given_to_load_are_defined() {
-        let dir = std::env::temp_dir().join(format!("newmayu-symbols-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("s.mayu"),
-            format!("{KEYS}\nif ( use109 )\nkey A = B\nendif\n"),
+    fn symbol_given_to_load_is_defined_ignoring_case() {
+        // if ( use109 ) / key A = B / endif
+        let src = format!("{KEYS}\nif ( use109 )\nkey A = B\nendif\n");
+        let c = load_files(
+            "symbols",
+            &[("s.mayu", src.as_bytes())],
+            &["USE109".to_string()],
         )
         .unwrap();
-        let c = load(&dir.join("s.mayu"), &["USE109".to_string()]).unwrap();
         assert_eq!(global(&c).assignments.len(), 1);
-        let c = load(&dir.join("s.mayu"), &[]).unwrap();
-        assert_eq!(global(&c).assignments.len(), 0);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn encodings() {
-        let dir = std::env::temp_dir().join(format!("newmayu-encoding-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // key 無変換 = B（無変換 = 0x7b）
+    fn symbol_not_given_to_load_is_undefined() {
+        let src = format!("{KEYS}\nif ( use109 )\nkey A = B\nendif\n");
+        let c = load_files("no-symbols", &[("s.mayu", src.as_bytes())], &[]).unwrap();
+        assert_eq!(global(&c).assignments.len(), 0);
+    }
+
+    /// `key 無変換 = B`（無変換 = 0x7b）が読めたか。
+    fn muhenkan_is_b(c: &Config) -> bool {
+        let a = only(global(c), Key::plain(0x7b));
+        matches!(a.actions.as_slice(), [Action::Key { key, .. }] if *key == B)
+    }
+
+    #[test]
+    fn utf8_file_is_read() {
         let src = format!("{KEYS}\ndef key 無変換 = 0x7b\nkey 無変換 = B\n");
-        let muhenkan = Key::plain(0x7b);
-        let check = |name: &str, bytes: &[u8]| {
-            std::fs::write(dir.join(name), bytes).unwrap();
-            let c = load(&dir.join(name), &[]).unwrap();
-            let a = only(global(&c), muhenkan);
-            assert!(
-                matches!(a.actions.as_slice(), [Action::Key { key, .. }] if *key == B),
-                "{name}"
-            );
-        };
+        let c = load_files("utf8", &[("utf8.mayu", src.as_bytes())], &[]).unwrap();
+        assert!(muhenkan_is_b(&c));
+    }
 
-        // UTF-8
-        check("utf8.mayu", src.as_bytes());
-        // BOM 付き UTF-8
-        check(
-            "bom.mayu",
-            &[b"\xEF\xBB\xBF".as_slice(), src.as_bytes()].concat(),
-        );
-        // CP932（"無変換".encode("shift_jis")）
-        let mut bytes = Vec::new();
-        for (i, part) in src.split("無変換").enumerate() {
-            if i > 0 {
-                bytes.extend_from_slice(b"\x96\xb3\x95\xcf\x8a\xb7");
-            }
-            bytes.extend_from_slice(part.as_bytes());
-        }
-        check("cp932.mayu", &bytes);
+    #[test]
+    fn utf8_file_with_bom_is_read() {
+        let src = format!("{KEYS}\ndef key 無変換 = 0x7b\nkey 無変換 = B\n");
+        let bytes = [b"\xEF\xBB\xBF".as_slice(), src.as_bytes()].concat();
+        let c = load_files("bom", &[("bom.mayu", &bytes)], &[]).unwrap();
+        assert!(muhenkan_is_b(&c));
+    }
 
+    #[test]
+    fn cp932_file_is_read() {
+        // "無変換".encode("shift_jis") = 96 b3 95 cf 8a b7
+        let bytes = [
+            format!("{KEYS}\ndef key ").as_bytes(),
+            b"\x96\xb3\x95\xcf\x8a\xb7",
+            b" = 0x7b\nkey ",
+            b"\x96\xb3\x95\xcf\x8a\xb7",
+            b" = B\n",
+        ]
+        .concat();
+        let c = load_files("cp932", &[("cp932.mayu", &bytes)], &[]).unwrap();
+        assert!(muhenkan_is_b(&c));
+    }
+
+    #[test]
+    fn file_in_neither_encoding_is_an_error_with_the_line() {
         // どちらでもない: エラー（UTF-8 として読めなくなった行番号付き）
-        std::fs::write(dir.join("bad.mayu"), b"# ok\n# \xfe\xff\n").unwrap();
-        let e = load(&dir.join("bad.mayu"), &[]).unwrap_err();
+        let e =
+            load_files("bad-encoding", &[("bad.mayu", b"# ok\n# \xfe\xff\n")], &[]).unwrap_err();
         assert_eq!(e.line, 2);
         assert!(e.message.contains("文字コード"), "{e}");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // ---- def key のスキャンコード ----------------------------------------------
+
     #[test]
-    fn def_key_with_multiple_scan_codes() {
+    fn def_key_reads_multiple_scan_codes() {
+        // def key Pause = E1-0x1d 0x45 / key Pause = A
         let c = load_ok("def key Pause = E1-0x1d 0x45\nkey Pause = A");
         let pause = Key::from_codes(&[
             ScanCode::new(ScanPrefix::E1, 0x1d),
@@ -3083,29 +3893,79 @@ key A = &Prefix(Sub, yes)"
         );
         assert!(c.keys.contains(&pause));
         assert!(c.keys.contains(&A));
-        // yamy と同じく最大 4 個
-        load_ok("def key Foo = 0x01 0x02 0x03 0x04");
-        load_err("def key Foo = 0x01 0x02 0x03 0x04 0x05");
     }
 
     #[test]
-    fn errors() {
+    fn def_key_reads_up_to_four_scan_codes() {
+        // yamy と同じく最大 4 個
+        load_ok("def key Foo = 0x01 0x02 0x03 0x04");
+    }
+
+    #[test]
+    fn def_key_with_five_scan_codes_is_an_error() {
+        load_err("def key Foo = 0x01 0x02 0x03 0x04 0x05");
+    }
+
+    // ---- エラー -------------------------------------------------------------
+
+    #[test]
+    fn undefined_key_is_an_error_with_the_line() {
         let e = load_err("key Z = A");
         assert!(e.message.contains("未定義"));
         assert_eq!(e.line, KEYS.lines().count() + 1);
+    }
+
+    #[test]
+    fn window_monitor_is_not_supported() {
         assert!(
             load_err("key A = &WindowMonitor(1)")
                 .message
                 .contains("未対応")
         );
+    }
+
+    #[test]
+    fn il_prefix_on_an_output_key_is_an_error() {
         assert!(load_err("key A = IL-B").message.contains("出力キー"));
+    }
+
+    #[test]
+    fn ic_prefix_on_an_output_key_is_an_error() {
         assert!(load_err("key A = IC-B").message.contains("出力キー"));
+    }
+
+    #[test]
+    fn max_prefix_is_not_supported() {
         assert!(load_err("key MAX-A = B").message.contains("未対応"));
+    }
+
+    #[test]
+    fn bang_before_a_modifier_name_is_not_supported() {
         assert!(load_err("mod !shift = A").message.contains("未対応"));
+    }
+
+    #[test]
+    fn undefined_keyseq_is_an_error() {
         assert!(load_err("key A = $Nothing").message.contains("未定義"));
+    }
+
+    #[test]
+    fn undefined_parent_keymap_is_an_error() {
         assert!(load_err("keymap X : Nowhere").message.contains("未定義"));
+    }
+
+    #[test]
+    fn defining_a_key_name_twice_is_an_error() {
         assert!(load_err("def key A = 0x01").message.contains("定義済み"));
+    }
+
+    #[test]
+    fn changing_the_default_modifiers_is_not_supported() {
         assert!(load_err("key C- = B").message.contains("未対応"));
+    }
+
+    #[test]
+    fn def_subst_right_side_must_start_with_a_key() {
         assert!(
             load_err("def subst A = &Default")
                 .message
@@ -3113,40 +3973,258 @@ key A = &Prefix(Sub, yes)"
         );
     }
 
-    #[test]
-    fn def_subst() {
-        let c = load_ok(
-            "keyseq $SB = S-*B A
+    // ---- def subst ----------------------------------------------------------
+
+    const SUBST_SRC: &str = "keyseq $SB = S-*B A
              def subst S-*A = $SB
              def subst H Space => IC-BS
              def subst D-LAlt = B
-             def subst *H = A",
-        );
+             def subst *H = A";
+
+    #[test]
+    fn each_left_key_of_def_subst_makes_a_substitution() {
+        let c = load_ok(SUBST_SRC);
+        assert_eq!(c.substs.len(), 5);
+    }
+
+    #[test]
+    fn later_def_subst_is_matched_first() {
+        // def subst *H = A（最後に書いた）
+        let c = load_ok(SUBST_SRC);
         let s = &c.substs;
-        assert_eq!(s.len(), 5);
-        // 後に書いたものが先に照合される
         assert_eq!((s[0].key, s[0].to_key), (H, A));
+    }
+
+    #[test]
+    fn star_in_def_subst_makes_all_conditions_dontcare() {
+        // def subst *H = A
+        let c = load_ok(SUBST_SRC);
+        let s = &c.substs;
         assert_eq!(s[0].mods, ModSpec::any());
         assert_eq!(s[0].locks, LockSpec::any());
-        assert_eq!(s[1].edge, EdgeSpec::Down);
-        // 左辺が複数なら同じ置き換え先を共有する。右辺には IC- を書ける
+    }
+
+    #[test]
+    fn d_prefix_in_def_subst_is_key_down_only() {
+        // def subst D-LAlt = B
+        let c = load_ok(SUBST_SRC);
+        assert_eq!(c.substs[1].edge, EdgeSpec::Down);
+    }
+
+    #[test]
+    fn left_keys_of_def_subst_share_the_replacement() {
+        // def subst H Space => IC-BS
+        let c = load_ok(SUBST_SRC);
+        let s = &c.substs;
         assert_eq!((s[2].key, s[3].key), (SPACE, H));
-        for x in &s[2..4] {
-            assert_eq!(x.to_key, BS);
-            assert_eq!(x.mods, base());
-            assert_eq!(x.locks, LockSpec::assign_default());
-            assert_eq!(
-                x.to_locks,
-                LockSpec::assign_default().with(LockMod::ImeComp)
-            );
-        }
-        // 右辺が keyseq なら先頭のキーだけ
+        assert_eq!(s[2].to_key, BS);
+        assert_eq!(s[3].to_key, BS);
+    }
+
+    #[test]
+    fn left_side_of_def_subst_has_the_default_conditions() {
+        // def subst H Space => IC-BS
+        let c = load_ok(SUBST_SRC);
+        let s = &c.substs;
+        assert_eq!(s[2].mods, base());
+        assert_eq!(s[2].locks, LockSpec::assign_default());
+        assert_eq!(s[3].mods, base());
+        assert_eq!(s[3].locks, LockSpec::assign_default());
+    }
+
+    #[test]
+    fn right_side_of_def_subst_takes_ic() {
+        // def subst H Space => IC-BS
+        let c = load_ok(SUBST_SRC);
+        let s = &c.substs;
+        assert_eq!(
+            s[2].to_locks,
+            LockSpec::assign_default().with(LockMod::ImeComp)
+        );
+        assert_eq!(
+            s[3].to_locks,
+            LockSpec::assign_default().with(LockMod::ImeComp)
+        );
+    }
+
+    #[test]
+    fn def_subst_takes_the_first_key_of_a_keyseq() {
+        // keyseq $SB = S-*B A / def subst S-*A = $SB
+        let c = load_ok(SUBST_SRC);
+        let s = &c.substs;
         assert_eq!(s[4].key, A);
         assert_eq!(s[4].mods, ModSpec::any().with(BasicMod::Shift));
         assert_eq!(s[4].to_key, B);
         assert_eq!(s[4].to_mods, ModSpec::any().with(BasicMod::Shift));
         assert_eq!(s[4].to_locks, LockSpec::any());
+    }
+
+    #[test]
+    fn keyseq_takes_il_and_ic() {
         // keyseq にも IL- IC- を書ける（出力には効かない）
         load_ok("keyseq $X = IL-A\nkey B = $X");
+    }
+
+    #[test]
+    fn def_alias_names_a_key() {
+        // def alias Esc = H
+        // key esc = B
+        let c = load_ok("def alias Esc = H\nkey esc = B");
+        assert_eq!(
+            only(global(&c), H).actions,
+            vec![Action::key_with(B, base())]
+        );
+    }
+
+    #[test]
+    fn def_alias_cannot_point_to_an_alias() {
+        // def alias X = H
+        // def alias Y = X   （yamy の searchKeyByNonAliasName）
+        let e = load_err("def alias X = H\ndef alias Y = X");
+        assert!(e.message.contains("別名は使えない"), "{e}");
+    }
+
+    #[test]
+    fn mod_mod0_assigns_the_key() {
+        // mod mod0 = 英数
+        let c = load_ok("mod mod0 = 英数");
+        assert_eq!(global(&c).mod_keys[BasicMod::Mod0.index()], vec![EISUU]);
+    }
+
+    #[test]
+    fn m0_prefix_requires_mod0() {
+        // key M0-A = B
+        let c = load_ok("mod mod0 = 英数\nkey M0-A = B");
+        assert_eq!(only(global(&c), A).mods, base().with(BasicMod::Mod0));
+    }
+
+    #[test]
+    fn elsif_is_else_if() {
+        let c = load_ok(
+            "define KBD109
+             if ( KBD104 )
+               key A = B
+             elsif ( KBD109 )
+               key H = B
+             endif",
+        );
+        let keys: Vec<Key> = global(&c).assignments.iter().map(|a| a.key).collect();
+        assert_eq!(keys, vec![H]);
+    }
+
+    #[test]
+    fn elif_is_else_if() {
+        let c = load_ok(
+            "define KBD109
+             if ( KBD104 )
+               key A = B
+             elif ( KBD109 )
+               key H = B
+             endif",
+        );
+        let keys: Vec<Key> = global(&c).assignments.iter().map(|a| a.key).collect();
+        assert_eq!(keys, vec![H]);
+    }
+
+    #[test]
+    fn or_is_else_if() {
+        let c = load_ok(
+            "define KBD109
+             if ( KBD104 )
+               key A = B
+             or ( KBD109 )
+               key H = B
+             endif",
+        );
+        let keys: Vec<Key> = global(&c).assignments.iter().map(|a| a.key).collect();
+        assert_eq!(keys, vec![H]);
+    }
+
+    #[test]
+    fn keymap2_default_action_is_keymap_parent() {
+        // keymap2 Sub : Global
+        // yamy の load_KEYMAP_DEFINITION は keymap2 でも &KeymapParent を入れる
+        let c = load_ok("keymap2 Sub : Global");
+        assert_eq!(c.keymaps[1].default_actions, vec![Action::KeymapParent]);
+    }
+
+    #[test]
+    fn window_minimize_takes_a_target() {
+        // key A = &WindowMinimize(MDI)
+        let c = load_ok("key A = &WindowMinimize(MDI)");
+        assert_eq!(
+            only(global(&c), A).actions,
+            vec![Action::Func(Func::WindowMinimize(Target::Mdi))]
+        );
+    }
+
+    #[test]
+    fn window_h_maximize_takes_a_target() {
+        // key A = &WindowHMaximize(MDI)
+        let c = load_ok("key A = &WindowHMaximize(MDI)");
+        assert_eq!(
+            only(global(&c), A).actions,
+            vec![Action::Func(Func::WindowHMaximize(Target::Mdi))]
+        );
+    }
+
+    #[test]
+    fn window_v_maximize_takes_a_target() {
+        // key A = &WindowVMaximize(MDI)
+        let c = load_ok("key A = &WindowVMaximize(MDI)");
+        assert_eq!(
+            only(global(&c), A).actions,
+            vec![Action::Func(Func::WindowVMaximize(Target::Mdi))]
+        );
+    }
+
+    #[test]
+    fn window_move_visibly_takes_a_target() {
+        // key A = &WindowMoveVisibly(MDI)
+        let c = load_ok("key A = &WindowMoveVisibly(MDI)");
+        assert_eq!(
+            only(global(&c), A).actions,
+            vec![Action::Func(Func::WindowMoveVisibly(Target::Mdi))]
+        );
+    }
+
+    #[test]
+    fn window_close_takes_a_target() {
+        // key A = &WindowClose(MDI)
+        let c = load_ok("key A = &WindowClose(MDI)");
+        assert_eq!(
+            only(global(&c), A).actions,
+            vec![Action::Func(Func::WindowClose(Target::Mdi))]
+        );
+    }
+
+    #[test]
+    fn window_cling_to_right_is_move_to_east() {
+        // key A = &WindowClingToRight
+        let c = load_ok("key A = &WindowClingToRight");
+        assert_eq!(
+            only(global(&c), A).actions,
+            vec![Action::Func(Func::WindowMoveTo {
+                gravity: Gravity::East,
+                dx: 0,
+                dy: 0,
+                target: Target::Overlapped
+            })]
+        );
+    }
+
+    #[test]
+    fn window_cling_to_top_is_move_to_north() {
+        // key A = &WindowClingToTop
+        let c = load_ok("key A = &WindowClingToTop");
+        assert_eq!(
+            only(global(&c), A).actions,
+            vec![Action::Func(Func::WindowMoveTo {
+                gravity: Gravity::North,
+                dx: 0,
+                dy: 0,
+                target: Target::Overlapped
+            })]
+        );
     }
 }

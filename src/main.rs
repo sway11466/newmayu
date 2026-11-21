@@ -306,26 +306,35 @@ fn wait_sync(sync: Option<Key>, rx: &Receiver<Event>, pending: &mut VecDeque<Eve
         return;
     };
     platform::send(&[Output::Release(key)]);
-    let deadline = Instant::now() + SYNC_WAIT;
+    match wait_sync_notify(rx, pending, SYNC_WAIT) {
+        Some(n) => log_detail!(
+            "&Sync: 届いた (thread={} hwnd={:#x})",
+            n.header.thread_id,
+            n.header.hwnd
+        ),
+        None => log!("&Sync: {SYNC_WAIT:?} 待っても届かなかった"),
+    }
+}
+
+/// 同期キーの通知を `wait` まで待つ。届けばその通知、届かなければ `None`。
+/// 待っている間に届いた他のイベントは、届いた順に `pending` に積む。
+fn wait_sync_notify(
+    rx: &Receiver<Event>,
+    pending: &mut VecDeque<Event>,
+    wait: Duration,
+) -> Option<Notify> {
+    let deadline = Instant::now() + wait;
     loop {
         let now = Instant::now();
         if now >= deadline {
-            break;
+            return None;
         }
         match rx.recv_timeout(deadline - now) {
-            Ok(Event::Notify(n)) if n.header.kind == Kind::Sync => {
-                log_detail!(
-                    "&Sync: 届いた (thread={} hwnd={:#x})",
-                    n.header.thread_id,
-                    n.header.hwnd
-                );
-                return;
-            }
+            Ok(Event::Notify(n)) if n.header.kind == Kind::Sync => return Some(n),
             Ok(ev) => pending.push_back(ev),
-            Err(_) => break,
+            Err(_) => return None,
         }
     }
-    log!("&Sync: {SYNC_WAIT:?} 待っても届かなかった");
 }
 
 /// エンジンの出力を出た順に実行する OS 窓口。キーは溜めておき、関数・`&Sync`・クリップボードの前と
@@ -712,6 +721,7 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use newmayu::model::ScanPrefix;
+    use newmayu_ipc::Header;
 
     fn a(v: &[&str]) -> Result<Args, String> {
         parse_args(v.iter().map(|s| s.to_string()))
@@ -827,5 +837,61 @@ mod tests {
             },
         ]);
         assert!(p.releases().is_empty());
+    }
+
+    fn notify(kind: Kind) -> Event {
+        Event::Notify(Notify {
+            header: Header {
+                kind,
+                cause: 0,
+                thread_id: 0,
+                hwnd: 0,
+                flags: 0,
+            },
+            class: String::new(),
+            title: String::new(),
+            params: (0, 0),
+        })
+    }
+
+    #[test]
+    fn 同期キーの通知が届いたら待つのをやめる() {
+        let (tx, rx) = channel();
+        let mut pending = VecDeque::new();
+        tx.send(notify(Kind::Sync)).unwrap();
+        assert!(wait_sync_notify(&rx, &mut pending, SYNC_WAIT).is_some());
+    }
+
+    #[test]
+    fn 待っている間に届いた他のイベントは後回しにする() {
+        let (tx, rx) = channel();
+        let mut pending = VecDeque::new();
+        tx.send(notify(Kind::Lock)).unwrap();
+        tx.send(notify(Kind::Focus)).unwrap();
+        tx.send(notify(Kind::Sync)).unwrap();
+        wait_sync_notify(&rx, &mut pending, SYNC_WAIT);
+        let kinds: Vec<Kind> = pending
+            .iter()
+            .map(|e| match e {
+                Event::Notify(n) => n.header.kind,
+                _ => panic!("Notify でない"),
+            })
+            .collect();
+        assert_eq!(kinds, vec![Kind::Lock, Kind::Focus]);
+    }
+
+    #[test]
+    fn 通知が来ないまま送り手が居なくなったら待つのをやめる() {
+        let (tx, rx) = channel::<Event>();
+        let mut pending = VecDeque::new();
+        drop(tx);
+        assert!(wait_sync_notify(&rx, &mut pending, SYNC_WAIT).is_none());
+    }
+
+    #[test]
+    fn 待ち時間が過ぎたら待つのをやめる() {
+        let (_tx, rx) = channel::<Event>();
+        let mut pending = VecDeque::new();
+        assert!(wait_sync_notify(&rx, &mut pending, Duration::ZERO).is_none());
     }
 }

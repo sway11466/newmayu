@@ -385,7 +385,6 @@ fn measure(dc: HDC, font: HFONT, s: &str, max_text: i32) -> (i32, i32) {
 
 fn layout(text: &HelpText, fonts: &Fonts, dpi: u32, work_width: i32) -> Layout {
     let pad_x = scale(PAD_X, dpi);
-    let pad_y = scale(PAD_Y, dpi);
     let pin = scale(PIN, dpi);
     let inset = scale(PIN_INSET, dpi);
     let max_width = scale(MAX_WIDTH, dpi).min(work_width * 6 / 10);
@@ -394,10 +393,19 @@ fn layout(text: &HelpText, fonts: &Fonts, dpi: u32, work_width: i32) -> Layout {
     // タイトルはピンの分だけ狭い
     let title_max = max_width - pad_x - pin - inset;
     let body_max = max_width - pad_x * 2;
-    let (tw, th) = measure(dc, fonts.title, &text.title, title_max);
-    let (bw, bh) = measure(dc, fonts.body, &text.body, body_max);
+    let title = measure(dc, fonts.title, &text.title, title_max);
+    let body = measure(dc, fonts.body, &text.body, body_max);
     // SAFETY: GetDC で得た DC。
     unsafe { ReleaseDC(None, dc) };
+    arrange(title, body, dpi)
+}
+
+/// 測った文字の大きさ（幅, 高さ）から板の中の配置を決める。OS に触れない。
+fn arrange((tw, th): (i32, i32), (bw, bh): (i32, i32), dpi: u32) -> Layout {
+    let pad_x = scale(PAD_X, dpi);
+    let pad_y = scale(PAD_Y, dpi);
+    let pin = scale(PIN, dpi);
+    let inset = scale(PIN_INSET, dpi);
     let width = (pad_x + tw + pin + inset)
         .max(pad_x * 2 + bw)
         .max(scale(MIN_WIDTH, dpi));
@@ -472,13 +480,19 @@ fn work_area(focus: u64) -> (RECT, u32) {
     (mi.rcWork, monitor_dpi(m))
 }
 
+/// 板の左上。作業領域の下の中央に置く（spec.md 6 章）。
+fn origin(work: &RECT, width: i32, height: i32, dpi: u32) -> (i32, i32) {
+    let x = work.left + (work.right - work.left - width) / 2;
+    let y = work.bottom - height - scale(MARGIN_BOTTOM, dpi);
+    (x, y)
+}
+
 fn show(focus: u64, text: HelpText) {
     let (work, dpi) = work_area(focus);
     let theme = theme();
     let fonts = Fonts::new(dpi);
     let lay = layout(&text, &fonts, dpi, work.right - work.left);
-    let x = work.left + (work.right - work.left - lay.width) / 2;
-    let y = work.bottom - lay.height - scale(MARGIN_BOTTOM, dpi);
+    let (x, y) = origin(&work, lay.width, lay.height, dpi);
     let (w, h, pin_rc) = (lay.width, lay.height, lay.pin);
 
     let hwnd = match current() {
@@ -914,4 +928,79 @@ unsafe extern "system" fn pin_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
     }
     // SAFETY: 既定の処理に渡す。
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn board_is_at_the_bottom_center_of_the_work_area() {
+        assert_eq!(origin(&rect(0, 0, 1920, 1040), 400, 80, 96), (760, 936));
+    }
+
+    #[test]
+    fn board_follows_the_work_area_of_another_monitor() {
+        assert_eq!(origin(&rect(1920, 0, 3840, 1040), 400, 80, 96), (2680, 936));
+    }
+
+    #[test]
+    fn bottom_margin_scales_with_dpi() {
+        assert_eq!(origin(&rect(0, 0, 1920, 1040), 400, 80, 144), (760, 924));
+    }
+
+    #[test]
+    fn width_fits_the_body_when_it_is_wider_than_the_title() {
+        assert_eq!(arrange((100, 20), (300, 40), 96).width, 332);
+    }
+
+    #[test]
+    fn width_fits_the_title_and_the_pin_when_they_are_wider() {
+        assert_eq!(arrange((300, 20), (100, 40), 96).width, 350);
+    }
+
+    #[test]
+    fn width_is_at_least_the_minimum() {
+        assert_eq!(arrange((10, 20), (0, 0), 96).width, 200);
+    }
+
+    #[test]
+    fn title_stops_before_the_pin() {
+        assert_eq!(
+            arrange((100, 20), (300, 40), 96).title,
+            rect(16, 12, 298, 32)
+        );
+    }
+
+    #[test]
+    fn body_is_below_the_title_row() {
+        assert_eq!(
+            arrange((100, 20), (300, 40), 96).body,
+            rect(16, 38, 316, 78)
+        );
+    }
+
+    #[test]
+    fn pin_is_at_the_top_right() {
+        assert_eq!(arrange((100, 20), (300, 40), 96).pin, rect(298, 6, 326, 34));
+    }
+
+    #[test]
+    fn height_ends_below_the_body() {
+        assert_eq!(arrange((100, 20), (300, 40), 96).height, 90);
+    }
+
+    #[test]
+    fn empty_body_adds_no_gap() {
+        assert_eq!(arrange((100, 20), (0, 0), 96).height, 46);
+    }
 }

@@ -39,7 +39,7 @@ use crate::engine::Output;
 use crate::model::{Func, Gravity, ShellExecute, ShowCommand, Target, ToWindow};
 
 /// `&WindowVMaximize` / `&WindowHMaximize` で覚えた元の位置（yamy の `WindowPosition`）。
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     H,
     V,
@@ -119,19 +119,7 @@ impl WindowOps {
                 let Some(w) = target_window(focus, t) else {
                     return;
                 };
-                let (rc, rcd) = (w.rc, w.area);
-                let mut x = rc.left;
-                let mut y = rc.top;
-                if rc.left < rcd.left {
-                    x = rcd.left;
-                } else if rcd.right < rc.right {
-                    x = rcd.right - width(&rc);
-                }
-                if rc.top < rcd.top {
-                    y = rcd.top;
-                } else if rcd.bottom < rc.bottom {
-                    y = rcd.bottom - height(&rc);
-                }
+                let (x, y) = moved_visibly(&w.rc, &w.area);
                 async_move(w.hwnd, x, y);
             }
             Func::WindowClose(t) => {
@@ -171,16 +159,7 @@ impl WindowOps {
                 let Some(t) = target_window(focus, target) else {
                     return;
                 };
-                let w = match w {
-                    0 => width(&t.rc),
-                    w if w < 0 => w + width(&t.area),
-                    w => w,
-                };
-                let h = match h {
-                    0 => height(&t.rc),
-                    h if h < 0 => h + height(&t.area),
-                    h => h,
-                };
+                let (w, h) = resized_to(&t.rc, &t.area, w, h);
                 // SAFETY: 有効な窓ハンドル。非同期で位置はそのまま。
                 let _ = unsafe {
                     SetWindowPos(
@@ -278,53 +257,26 @@ impl WindowOps {
             sys_command(w.hwnd, SC_RESTORE);
             return;
         }
-        let mut rc = w.rc;
-        let rcd = w.area;
-        let mode = match self.positions.iter().position(|p| p.hwnd == w.hwnd) {
-            Some(i) => {
-                let p = &mut self.positions[i];
-                rc = p.rc;
-                match (p.mode, horizontal) {
-                    (Mode::Hv, true) => {
-                        p.mode = Mode::V;
-                        Some(Mode::V)
-                    }
-                    (Mode::Hv, false) => {
-                        p.mode = Mode::H;
-                        Some(Mode::H)
-                    }
-                    (Mode::V, true) | (Mode::H, false) => {
-                        p.mode = Mode::Hv;
-                        Some(Mode::Hv)
-                    }
-                    _ => {
-                        // 同じ向きをもう一度: 元に戻す
-                        self.positions.remove(i);
-                        None
-                    }
-                }
+        let found = self.positions.iter().position(|p| p.hwnd == w.hwnd);
+        // 覚えていれば、元の位置は覚えたときのもの
+        let original = found.map_or(w.rc, |i| self.positions[i].rc);
+        let mode = hv_next(found.map(|i| self.positions[i].mode), horizontal);
+        match (found, mode) {
+            (Some(i), Some(mode)) => self.positions[i].mode = mode,
+            (Some(i), None) => {
+                self.positions.remove(i);
             }
-            None => {
-                let mode = if horizontal { Mode::H } else { Mode::V };
-                self.positions.insert(
-                    0,
-                    Remembered {
-                        hwnd: w.hwnd,
-                        rc,
-                        mode,
-                    },
-                );
-                Some(mode)
-            }
-        };
-        if matches!(mode, Some(Mode::H) | Some(Mode::Hv)) {
-            rc.left = rcd.left;
-            rc.right = rcd.right;
+            (None, Some(mode)) => self.positions.insert(
+                0,
+                Remembered {
+                    hwnd: w.hwnd,
+                    rc: original,
+                    mode,
+                },
+            ),
+            (None, None) => {}
         }
-        if matches!(mode, Some(Mode::V) | Some(Mode::Hv)) {
-            rc.top = rcd.top;
-            rc.bottom = rcd.bottom;
-        }
+        let rc = hv_rect(original, &w.area, mode);
         // SAFETY: 有効な窓ハンドル。非同期で移動と大きさ変更。
         let _ = unsafe {
             SetWindowPos(
@@ -368,15 +320,15 @@ impl WindowOps {
         } else {
             // SAFETY: 有効な窓ハンドル。
             unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED.0 as isize) };
-            let alpha = alpha % 101;
             // SAFETY: 有効な窓ハンドル。
             if unsafe {
-                SetLayeredWindowAttributes(hwnd, COLORREF(0), (255 * alpha / 100) as u8, LWA_ALPHA)
+                SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha_byte(alpha), LWA_ALPHA)
             }
             .is_err()
             {
                 crate::log!(
-                    "&WindowSetAlpha({alpha}): 失敗 (hwnd={:#x})",
+                    "&WindowSetAlpha({}): 失敗 (hwnd={:#x})",
+                    alpha % 101,
                     hwnd.0 as usize
                 );
                 return;
@@ -478,22 +430,97 @@ fn move_to(focus: HWND, t: Target, gravity: Gravity, dx: i32, dy: i32) {
     let Some(w) = target_window(focus, t) else {
         return;
     };
-    let (rc, rcd) = (w.rc, w.area);
+    let (x, y) = moved_to(&w.rc, &w.area, gravity, dx, dy);
+    async_move(w.hwnd, x, y);
+}
+
+// ---- 位置と大きさの計算（OS に触れない） ------------------------------------
+//
+// `rc` は窓の位置、`area` は動かせる範囲（[`TargetWindow`]）。
+
+/// `&WindowMove` / `&WindowMoveTo` の移動先の左上（yamy の `funcWindowMoveTo`）。
+fn moved_to(rc: &RECT, area: &RECT, gravity: Gravity, dx: i32, dy: i32) -> (i32, i32) {
     let mut x = rc.left + dx;
     let mut y = rc.top + dy;
     if gravity.north() {
-        y = dy + rcd.top;
+        y = dy + area.top;
     }
     if gravity.east() {
-        x = dx + rcd.right - width(&rc);
+        x = dx + area.right - width(rc);
     }
     if gravity.west() {
-        x = dx + rcd.left;
+        x = dx + area.left;
     }
     if gravity.south() {
-        y = dy + rcd.bottom - height(&rc);
+        y = dy + area.bottom - height(rc);
     }
-    async_move(w.hwnd, x, y);
+    (x, y)
+}
+
+/// `&WindowMoveVisibly` の移動先の左上（yamy の `funcWindowMoveVisibly`）。
+fn moved_visibly(rc: &RECT, area: &RECT) -> (i32, i32) {
+    let mut x = rc.left;
+    let mut y = rc.top;
+    if rc.left < area.left {
+        x = area.left;
+    } else if area.right < rc.right {
+        x = area.right - width(rc);
+    }
+    if rc.top < area.top {
+        y = area.top;
+    } else if area.bottom < rc.bottom {
+        y = area.bottom - height(rc);
+    }
+    (x, y)
+}
+
+/// `&WindowResizeTo` の大きさ。0 はそのまま、負は範囲の大きさからの差（yamy の `funcWindowResizeTo`）。
+fn resized_to(rc: &RECT, area: &RECT, w: i32, h: i32) -> (i32, i32) {
+    let w = match w {
+        0 => width(rc),
+        w if w < 0 => w + width(area),
+        w => w,
+    };
+    let h = match h {
+        0 => height(rc),
+        h if h < 0 => h + height(area),
+        h => h,
+    };
+    (w, h)
+}
+
+/// 縦／横最大化をした後の状態。`prev` は覚えている状態（覚えていなければ `None`）。
+/// 戻り値の `None` は元の位置に戻して忘れる（yamy の `funcWindowHVMaximize`）。
+fn hv_next(prev: Option<Mode>, horizontal: bool) -> Option<Mode> {
+    match (prev, horizontal) {
+        (None, true) => Some(Mode::H),
+        (None, false) => Some(Mode::V),
+        (Some(Mode::Hv), true) => Some(Mode::V),
+        (Some(Mode::Hv), false) => Some(Mode::H),
+        (Some(Mode::V), true) | (Some(Mode::H), false) => Some(Mode::Hv),
+        // 同じ向きをもう一度: 元に戻す
+        (Some(Mode::H), true) | (Some(Mode::V), false) => None,
+    }
+}
+
+/// 縦／横最大化の後の位置。`original` は最大化する前の位置。
+fn hv_rect(original: RECT, area: &RECT, mode: Option<Mode>) -> RECT {
+    let mut rc = original;
+    if matches!(mode, Some(Mode::H) | Some(Mode::Hv)) {
+        rc.left = area.left;
+        rc.right = area.right;
+    }
+    if matches!(mode, Some(Mode::V) | Some(Mode::Hv)) {
+        rc.top = area.top;
+        rc.bottom = area.bottom;
+    }
+    rc
+}
+
+/// `&WindowSetAlpha` の 0〜100 を `SetLayeredWindowAttributes` の 0〜255 にする
+/// （yamy の `funcWindowSetAlpha`。101 以上は 101 で割った余り）。
+fn alpha_byte(alpha: i32) -> u8 {
+    (255 * (alpha % 101) / 100) as u8
 }
 
 fn width(rc: &RECT) -> i32 {
@@ -750,5 +777,190 @@ unsafe fn write_clipboard_text(s: &str) {
         {
             crate::log!("クリップボードに書けない");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    /// 動かせる範囲（作業領域）。左上が (0, 0) でない画面。
+    const AREA: RECT = rect(10, 20, 1010, 820);
+    /// 幅 300・高さ 300 の窓。
+    const WINDOW: RECT = rect(100, 200, 400, 500);
+
+    #[test]
+    fn move_adds_the_offset_to_the_position() {
+        // &WindowMove(16, -8)
+        assert_eq!(
+            moved_to(&WINDOW, &AREA, Gravity::Center, 16, -8),
+            (116, 192)
+        );
+    }
+
+    #[test]
+    fn move_to_north_measures_y_from_the_top_of_the_area() {
+        // &WindowMoveTo(N, 3, 4)
+        assert_eq!(moved_to(&WINDOW, &AREA, Gravity::North, 3, 4), (103, 24));
+    }
+
+    #[test]
+    fn move_to_south_measures_y_from_the_bottom_of_the_area() {
+        // &WindowMoveTo(S, 3, 4)
+        assert_eq!(moved_to(&WINDOW, &AREA, Gravity::South, 3, 4), (103, 524));
+    }
+
+    #[test]
+    fn move_to_east_measures_x_from_the_right_of_the_area() {
+        // &WindowMoveTo(E, 3, 4)
+        assert_eq!(moved_to(&WINDOW, &AREA, Gravity::East, 3, 4), (713, 204));
+    }
+
+    #[test]
+    fn move_to_west_measures_x_from_the_left_of_the_area() {
+        // &WindowMoveTo(W, 3, 4)
+        assert_eq!(moved_to(&WINDOW, &AREA, Gravity::West, 3, 4), (13, 204));
+    }
+
+    #[test]
+    fn move_to_north_east_measures_from_the_corner() {
+        // &WindowMoveTo(NE, 3, 4)
+        assert_eq!(
+            moved_to(&WINDOW, &AREA, Gravity::NorthEast, 3, 4),
+            (713, 24)
+        );
+    }
+
+    #[test]
+    fn move_visibly_keeps_a_window_inside_the_area() {
+        // &WindowMoveVisibly
+        assert_eq!(moved_visibly(&WINDOW, &AREA), (100, 200));
+    }
+
+    #[test]
+    fn move_visibly_brings_back_the_left_edge() {
+        assert_eq!(moved_visibly(&rect(-50, 200, 250, 500), &AREA), (10, 200));
+    }
+
+    #[test]
+    fn move_visibly_brings_back_the_right_edge() {
+        assert_eq!(moved_visibly(&rect(900, 200, 1200, 500), &AREA), (710, 200));
+    }
+
+    #[test]
+    fn move_visibly_brings_back_the_top_edge() {
+        assert_eq!(moved_visibly(&rect(100, -5, 400, 295), &AREA), (100, 20));
+    }
+
+    #[test]
+    fn move_visibly_brings_back_the_bottom_edge() {
+        assert_eq!(moved_visibly(&rect(100, 700, 400, 1000), &AREA), (100, 520));
+    }
+
+    #[test]
+    fn resize_to_zero_keeps_the_size() {
+        // &WindowResizeTo(0, 0)
+        assert_eq!(resized_to(&WINDOW, &AREA, 0, 0), (300, 300));
+    }
+
+    #[test]
+    fn resize_to_negative_is_measured_from_the_area_size() {
+        // &WindowResizeTo(-100, -50)
+        assert_eq!(resized_to(&WINDOW, &AREA, -100, -50), (900, 750));
+    }
+
+    #[test]
+    fn resize_to_positive_is_the_size() {
+        // &WindowResizeTo(640, 480)
+        assert_eq!(resized_to(&WINDOW, &AREA, 640, 480), (640, 480));
+    }
+
+    #[test]
+    fn first_h_maximize_is_horizontal() {
+        // &WindowHMaximize
+        assert_eq!(hv_next(None, true), Some(Mode::H));
+    }
+
+    #[test]
+    fn first_v_maximize_is_vertical() {
+        // &WindowVMaximize
+        assert_eq!(hv_next(None, false), Some(Mode::V));
+    }
+
+    #[test]
+    fn v_maximize_after_h_maximize_is_both() {
+        assert_eq!(hv_next(Some(Mode::H), false), Some(Mode::Hv));
+    }
+
+    #[test]
+    fn h_maximize_after_v_maximize_is_both() {
+        assert_eq!(hv_next(Some(Mode::V), true), Some(Mode::Hv));
+    }
+
+    #[test]
+    fn h_maximize_on_both_leaves_vertical() {
+        assert_eq!(hv_next(Some(Mode::Hv), true), Some(Mode::V));
+    }
+
+    #[test]
+    fn v_maximize_on_both_leaves_horizontal() {
+        assert_eq!(hv_next(Some(Mode::Hv), false), Some(Mode::H));
+    }
+
+    #[test]
+    fn h_maximize_twice_restores() {
+        assert_eq!(hv_next(Some(Mode::H), true), None);
+    }
+
+    #[test]
+    fn v_maximize_twice_restores() {
+        assert_eq!(hv_next(Some(Mode::V), false), None);
+    }
+
+    #[test]
+    fn horizontal_fills_the_width_of_the_area() {
+        assert_eq!(
+            hv_rect(WINDOW, &AREA, Some(Mode::H)),
+            rect(10, 200, 1010, 500)
+        );
+    }
+
+    #[test]
+    fn vertical_fills_the_height_of_the_area() {
+        assert_eq!(
+            hv_rect(WINDOW, &AREA, Some(Mode::V)),
+            rect(100, 20, 400, 820)
+        );
+    }
+
+    #[test]
+    fn both_fills_the_area() {
+        assert_eq!(hv_rect(WINDOW, &AREA, Some(Mode::Hv)), AREA);
+    }
+
+    #[test]
+    fn restored_rect_is_the_remembered_one() {
+        assert_eq!(hv_rect(WINDOW, &AREA, None), WINDOW);
+    }
+
+    #[test]
+    fn alpha_is_a_percentage_of_255() {
+        // &WindowSetAlpha(70)
+        assert_eq!(alpha_byte(70), 178);
+    }
+
+    #[test]
+    fn alpha_over_100_wraps_around() {
+        // &WindowSetAlpha(150)（yamy の i_alpha %= 101）
+        assert_eq!(alpha_byte(150), 124);
     }
 }
