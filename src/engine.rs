@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::{
     Action, BasicMod, Config, Edge, EdgeSpec, EventKind, Func, HelpText, Key, KeymapId, LockMod,
-    LockState, ModSpec, ModState, ShellExecute, ShowCommand,
+    LockSpec, LockState, ModSpec, ModState, ShellExecute, ShowCommand,
 };
 
 /// フックから届く 1 イベント。
@@ -151,6 +151,8 @@ pub struct Engine {
     is_prefix: bool,
     /// 待っているあいだ修飾キーを真のモディファイヤにする（yamy の `m_doesIgnoreModifierForPrefix`）。
     ignore_mods_for_prefix: bool,
+    /// `&EditNextModifier` の修飾。待っているあいだのキーにこれを重ねる（yamy の `m_modifierForNextKey`）。
+    edit_next: Option<(ModSpec, LockSpec)>,
     /// 物理的に押されているキー。
     pressed: HashSet<Key>,
     /// 押したときに出した動作列（離しで使う）。
@@ -164,8 +166,8 @@ pub struct Engine {
     /// 複数スキャンコードのキーの組み立て途中（yamy の `keyboardHandler` の `key`）。
     /// 押し・離しは最初のスキャンコードのもの。
     pending: Option<Input>,
-    /// `!!` の修飾キーを押したときの修飾（yamy の `m_oneShotKey`）。他のキーを押したら消す。
-    one_shot: Option<(ModState, ModSpec)>,
+    /// `!!` の修飾キーを押したときの修飾と鍵（yamy の `m_oneShotKey`）。他のキーを押したら消す。
+    one_shot: Option<(ModState, ModSpec, LockState)>,
     /// 続けて kill-line したときに溜めた文字列（yamy の `EmacsEditKillLine::m_buf`）。
     kill_line: String,
     /// この入力の処理で kill-line の関数が呼ばれなければ `kill_line` を捨てる
@@ -186,6 +188,7 @@ impl Engine {
             current,
             is_prefix: false,
             ignore_mods_for_prefix: false,
+            edit_next: None,
             variable: 0,
             pending: None,
             one_shot: None,
@@ -280,13 +283,22 @@ impl Engine {
         }
 
         let keymap = self.config.keymap(self.current);
-        let state = self.current_mods();
+        let mut state = self.current_mods();
         // このキー自身が修飾キーなら、その修飾は問わない（yamy の fixModifierKey）。
         // 照合には効かず、出力キーの修飾を埋めるときに「触らない」印として効く。
         let own_mod = keymap.modifier_of(key);
         let mut event_mods = ModSpec::from_state(state);
         if let Some(m) = own_mod {
             event_mods = event_mods.dontcare(m);
+        }
+        let mut locks = self.locks;
+        // &EditNextModifier: 書いた修飾・鍵はその値に、書かなかったものは実際の状態のまま
+        if self.is_prefix
+            && let Some((mods, lock_spec)) = self.edit_next
+        {
+            state = mods.apply(state);
+            event_mods = mods.add(event_mods);
+            locks = lock_spec.apply(locks);
         }
 
         if own_mod.is_some() && self.is_prefix && self.ignore_mods_for_prefix {
@@ -295,11 +307,12 @@ impl Engine {
             // `!!` の修飾キー（yamy の AM_oneShot）: 押しでは何も出さない。他のキーを押さずに離したら、
             // 押したときの修飾でこのキーを押して離す
             match edge {
-                Edge::Down => self.one_shot = Some((state, event_mods)),
+                Edge::Down => self.one_shot = Some((state, event_mods, locks)),
                 Edge::Up => {
-                    if let Some((state, event_mods)) = self.one_shot.take() {
-                        self.begin_generating(os, key, Edge::Down, state, event_mods, false);
-                        self.begin_generating(os, key, Edge::Up, state, event_mods, false);
+                    if let Some((state, event_mods, locks)) = self.one_shot.take() {
+                        let k = (state, event_mods, locks);
+                        self.begin_generating(os, key, Edge::Down, k, false);
+                        self.begin_generating(os, key, Edge::Up, k, false);
                     }
                 }
             }
@@ -307,7 +320,7 @@ impl Engine {
             if edge == Edge::Down {
                 self.one_shot = None;
             }
-            self.generate_with_prefix(os, key, edge, own_mod, state, event_mods);
+            self.generate_with_prefix(os, key, edge, own_mod, (state, event_mods, locks));
         }
 
         self.release_all_if_idle(os);
@@ -334,8 +347,7 @@ impl Engine {
         key: Key,
         edge: Edge,
         own_mod: Option<BasicMod>,
-        state: ModState,
-        event_mods: ModSpec,
+        mods: (ModState, ModSpec, LockState),
     ) {
         // &Prefix の前後処理（yamy の beginGeneratingKeyboardEvents）。
         //   (1) D-prefix  : 現在のキーマップで解決し &Prefix(X) が走る
@@ -350,7 +362,7 @@ impl Engine {
             }
         }
 
-        self.begin_generating(os, key, edge, state, event_mods, own_mod.is_some());
+        self.begin_generating(os, key, edge, mods, own_mod.is_some());
 
         if own_mod.is_none() {
             if !self.is_prefix {
@@ -368,41 +380,40 @@ impl Engine {
         os: &mut dyn Os,
         key: Key,
         edge: Edge,
-        state: ModState,
-        event_mods: ModSpec,
+        mods: (ModState, ModSpec, LockState),
         is_modifier: bool,
     ) {
         self.kill_line_reset = !is_modifier;
-        self.generate_key(os, key, edge, state, event_mods);
+        self.generate_key(os, key, edge, mods);
         if self.kill_line_reset {
             self.kill_line.clear();
         }
     }
 
     /// いまのキーマップで 1 キーを出す（`def subst`・event・押したときの動作列の記録を含む）。
+    /// `mods` は照合に使う修飾・出力キーの修飾を埋める修飾・鍵の状態。
     fn generate_key(
         &mut self,
         os: &mut dyn Os,
         key: Key,
         edge: Edge,
-        state: ModState,
-        event_mods: ModSpec,
+        (state, event_mods, locks): (ModState, ModSpec, LockState),
     ) {
         let keymap_id = self.current;
         let mut cur = Current {
             input: key,
             key,
             state,
-            locks: self.locks,
+            locks,
             event_mods,
             focus_idx: 0,
         };
         // def subst: キーマップで引く前にキーを置き換える（yamy の beginGeneratingKeyboardEvents）。
         // 置き換え先で書いた修飾・鍵はその値に、dontcare のものは入力のままにする。
-        if let Some(s) = self.config.substitute(key, state, self.locks, edge) {
+        if let Some(s) = self.config.substitute(key, state, locks, edge) {
             cur.key = s.to_key;
             cur.state = s.to_mods.apply(state);
-            cur.locks = s.to_locks.apply(self.locks);
+            cur.locks = s.to_locks.apply(locks);
             cur.event_mods = s.to_mods.add(event_mods);
         }
         // 離しは、押したときに覚えた動作列があればそれを使う。
@@ -560,6 +571,7 @@ impl Engine {
                     self.current = *target;
                     self.is_prefix = true;
                     self.ignore_mods_for_prefix = *ignore_modifiers;
+                    self.edit_next = None;
                     self.generate_event(os, EventKind::Prefixed, *target, cur, depth + 1);
                 }
             }
@@ -703,6 +715,13 @@ impl Engine {
             Action::LoadSetting(name) => {
                 if edge == Edge::Down {
                     os.output(Output::LoadSetting(name.clone()));
+                }
+            }
+            Action::EditNextModifier(mods, locks) => {
+                if edge == Edge::Down {
+                    self.is_prefix = true;
+                    self.ignore_mods_for_prefix = true;
+                    self.edit_next = Some((*mods, *locks));
                 }
             }
             Action::DescribeBindings => {
@@ -1314,6 +1333,66 @@ mod tests {
         .into_iter()
         .map(|i| feed(&mut e, i))
         .collect()
+    }
+
+    /// default.mayu の `key Escape = &Prefix(GlobalEscape) &EditNextModifier(M-)` を B で。
+    /// GlobalEscape では M-X が H。A は `&Prefix(GlobalEscape)` だけ
+    fn escape_to_meta() -> Engine {
+        const L_ALT: Key = Key::plain(0x38);
+        let (mut config, mut global) = base();
+        config.keys.push(L_ALT);
+        config.def_mod(BasicMod::Alt, [L_ALT]);
+        global.add_mod_key(BasicMod::Alt, L_ALT);
+        let esc = KeymapId(1);
+        let (none, both, any) = (ModSpec::none(), EdgeSpec::Both, LockSpec::any());
+        let meta = ModSpec::any().with(BasicMod::Alt);
+        global.assign(
+            B,
+            none,
+            both,
+            any,
+            vec![
+                Action::Prefix(esc, true),
+                Action::EditNextModifier(meta, any),
+            ],
+        );
+        global.assign(A, none, both, any, vec![Action::Prefix(esc, true)]);
+        let mut esc_km = Keymap::new("GlobalEscape", Some(GLOBAL));
+        esc_km.add_mod_key(BasicMod::Control, L_CONTROL);
+        esc_km.add_mod_key(BasicMod::Control, R_CONTROL);
+        esc_km.add_mod_key(BasicMod::Alt, L_ALT);
+        let alt = ModSpec::none().with(BasicMod::Alt);
+        esc_km.assign(X, alt, both, any, vec![Action::key(H)]);
+        engine(config, vec![global, esc_km])
+    }
+
+    #[test]
+    fn edit_next_modifier_adds_modifier_to_next_key() {
+        let mut e = escape_to_meta();
+        assert_eq!(feed(&mut e, Input::down(B)), vec![]);
+        assert_eq!(feed(&mut e, Input::up(B)), vec![]);
+        // X は M-X として GlobalEscape で引かれる
+        assert_eq!(feed(&mut e, Input::down(X)), vec![Output::Press(H)]);
+        assert_eq!(feed(&mut e, Input::up(X)), vec![Output::Release(H)]);
+        assert!(!e.is_prefix);
+        // 割付の無いキーは、Alt を付けたまま素通しになる
+        feed(&mut e, Input::down(B));
+        feed(&mut e, Input::up(B));
+        assert_eq!(
+            feed(&mut e, Input::down(F)),
+            vec![Output::Press(Key::plain(0x38)), Output::Press(F)]
+        );
+    }
+
+    #[test]
+    fn prefix_alone_does_not_edit_next_modifier() {
+        let mut e = escape_to_meta();
+        // 先に B で修飾を付ける設定を入れても、&Prefix だけのキーはそれを消す
+        feed(&mut e, Input::down(B));
+        feed(&mut e, Input::up(B));
+        feed(&mut e, Input::down(A));
+        feed(&mut e, Input::up(A));
+        assert_eq!(feed(&mut e, Input::down(X)), vec![Output::Press(X)]);
     }
 
     #[test]

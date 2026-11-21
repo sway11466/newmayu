@@ -388,6 +388,10 @@ pub fn action_text(
         Action::InvestigateCommand => "&InvestigateCommand".to_string(),
         Action::LoadSetting(name) => func("LoadSetting", &[quoted(name)]),
         Action::DescribeBindings => "&DescribeBindings".to_string(),
+        Action::EditNextModifier(mods, locks) => func(
+            "EditNextModifier",
+            &[YamyMod::of(*mods, EdgeSpec::Both, *locks).text()],
+        ),
     }
 }
 

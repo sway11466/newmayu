@@ -18,14 +18,6 @@
 
 実装済みコードに足す機能。採番は本書冒頭「index」。各エントリは 背景／ゴール／対応／該当 で記す。
 
-### feature-18
-
-**&EditNextModifier**
-- ゴール：`define MAP-ESCAPE-TO-META` のときの default.mayu が読め、Escape の次のキーに `M-` が付いたものとして yamy と同じく効く。
-- 背景：default.mayu・emacsedit.mayu・workaround.mayu が MAP-ESCAPE-TO-META のときに `&Prefix(…) &EditNextModifier(M-)` を使う。newmayu では読み込みエラーになる。
-- 対応：mayu と yamy の `&EditNextModifier` の動きを調べて足す。
-- 該当：`src/config/parser.rs`・`src/model.rs`・`src/engine.rs`。
-
 ### feature-7
 
 **TSF のアプリで変換中を取る**
@@ -58,6 +50,7 @@
 - &WindowIdentify / &InvestigateCommand / &LoadSetting：default.mayu の C-S-D でフォーカス窓の CLASS・TITLE・位置と大きさがログに出る（コンソールでも出る）。C-S-F1 の後にメニューやボタンを使うと `&PostMessage(…)` の行が出て、もう一度 C-S-F1 で止まる。C-S-S で設定が読み直される。`&LoadSetting("名前")` でその名前の設定に切り替わり、一覧に無い名前ならログに `unknown setting name` が出る。
 - &DescribeBindings：Word で C-S-/ を押すと、ログに Word のキーマップから Global までの割付が yamy と同じ形で並ぶ。
 - &Prefix の ignore_modifiers：emacsedit.mayu の C-X の後に Shift などの修飾キーを押しても、OS へは送られない（2 ストローク目の修飾としてだけ効く）。
+- &EditNextModifier：`define MAP-ESCAPE-TO-META` の default.mayu で、Esc の次に X を押すと Alt+X が出る。
 - ログダイアログ：トレイの「ログ」で出て、起動時の見出しと設定の読み込みのログが並ぶ。「詳細」を付けるとキー変換・フォーカスの行も出る。「ログのクリア」で消えて見出しが出直す。「フォントの変更」でログの文字がすぐ変わり、`yamy.ini` の `logFont` に書かれる。「閉じる」で隠れる。default.mayu などの `&MayuDialog(Log, …)` / `&LogClear` も同じく効く。再読込に失敗するとログダイアログが出る。
 
 ## parking lot

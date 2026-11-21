@@ -554,6 +554,9 @@ pub enum Action {
     LoadSetting(String),
     /// `&DescribeBindings`: いまの窓で効いている割付をログに出す。押したときだけ。
     DescribeBindings,
+    /// `&EditNextModifier(修飾)`: プレフィックス状態に入り、次のキーを指定の修飾が付いたものとして引く。
+    /// 書かなかった修飾・鍵は dontcare（実際の状態のまま）。押したときだけ。
+    EditNextModifier(ModSpec, LockSpec),
 }
 
 /// `&ShellExecute` の引数。空の文字列は yamy と同じく、操作なら `open`、それ以外なら NULL として渡す。

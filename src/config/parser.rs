@@ -1294,6 +1294,10 @@ impl Loader {
                         out.push(Action::DescribeBindings);
                         continue;
                     }
+                    if fname.eq_ignore_ascii_case("EditNextModifier") {
+                        out.push(self.load_edit_next_modifier(cur)?);
+                        continue;
+                    }
                     if fname.eq_ignore_ascii_case("InvestigateCommand") {
                         out.push(Action::InvestigateCommand);
                         continue;
@@ -1476,6 +1480,50 @@ impl Loader {
         };
         self.expect_sym(cur, ")")?;
         Ok(KeymapId(idx))
+    }
+
+    /// `&EditNextModifier(修飾)`。書かなかった修飾・鍵は dontcare（yamy の `load_ARGUMENT(Modifier)`）。
+    fn load_edit_next_modifier(&self, cur: &mut Cur) -> Result<Action> {
+        self.expect_sym(cur, "(")?;
+        let mut mods = ModSpec::any();
+        let mut locks = LockSpec::any();
+        let mut flag = Flag::Press;
+        loop {
+            match cur.next() {
+                Some(Token::Sym("*")) => flag = Flag::Dontcare,
+                Some(Token::Sym("~")) => flag = Flag::Release,
+                Some(Token::Sym(s)) if basic_mod_by_prefix(s).is_some() => {
+                    let m = basic_mod_by_prefix(s).expect("上で確かめた");
+                    mods = match flag {
+                        Flag::Press => mods.with(m),
+                        Flag::Release => mods.without(m),
+                        Flag::Dontcare => mods.dontcare(m),
+                    };
+                    flag = Flag::Press;
+                }
+                Some(Token::Sym(s)) if lock_mod_by_prefix(s).is_some() => {
+                    let m = lock_mod_by_prefix(s).expect("上で確かめた");
+                    locks = match flag {
+                        Flag::Press => locks.with(m),
+                        Flag::Release => locks.without(m),
+                        Flag::Dontcare => locks.dontcare(m),
+                    };
+                    flag = Flag::Press;
+                }
+                Some(Token::Sym(")")) if flag == Flag::Press => {
+                    return Ok(Action::EditNextModifier(mods, locks));
+                }
+                Some(Token::Name(s)) if s.is_empty() && flag == Flag::Press => {
+                    // `&EditNextModifier()` の空の引数
+                    self.expect_sym(cur, ")")?;
+                    return Ok(Action::EditNextModifier(mods, locks));
+                }
+                Some(t) => {
+                    return self.err(format!("`&EditNextModifier`: 修飾が要る所に `{t}`"));
+                }
+                None => return self.err("`)` が無い"),
+            }
+        }
     }
 
     /// `&Prefix(キーマップ [, ignore_modifiers])`。ignore_modifiers の既定は true（yamy と同じ）。
@@ -2723,6 +2771,43 @@ keymap Sub : Global"
         assert_eq!(only(global(&c), A).actions[0], Action::Sync);
         let c = load_ok("key A = &Sync");
         assert_eq!(c.sync, None);
+    }
+
+    #[test]
+    fn edit_next_modifier() {
+        let c = load_ok(
+            "key A = &EditNextModifier(M-)
+             key B = &EditNextModifier(~S-C-IC-)
+             key H = &EditNextModifier()",
+        );
+        let g = global(&c);
+        let any = LockSpec::any();
+        assert_eq!(
+            only(g, A).actions,
+            vec![Action::EditNextModifier(
+                ModSpec::any().with(BasicMod::Alt),
+                any
+            )]
+        );
+        assert_eq!(
+            only(g, B).actions,
+            vec![Action::EditNextModifier(
+                ModSpec::any()
+                    .without(BasicMod::Shift)
+                    .with(BasicMod::Control),
+                any.with(LockMod::ImeComp)
+            )]
+        );
+        assert_eq!(
+            only(g, H).actions,
+            vec![Action::EditNextModifier(ModSpec::any(), any)]
+        );
+        assert_eq!(only(g, A).text, "&EditNextModifier(A-)  ");
+        assert!(
+            load_err("key A = &EditNextModifier(Foo)")
+                .to_string()
+                .contains("修飾が要る所")
+        );
     }
 
     #[test]
