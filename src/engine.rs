@@ -1112,6 +1112,19 @@ mod tests {
         assert_eq!(feed(&mut e, Input::up(k45)), vec![]);
     }
 
+    /// 設定を読めずに起動したときの空の設定（本体が `load_str("")` で作る）でも、
+    /// 窓・IME・ロックの通知を受けられる
+    #[test]
+    fn empty_config_accepts_notifications() {
+        let config = crate::config::parser::load_str("", "", std::path::Path::new("."))
+            .expect("空でも読める");
+        let mut e = Engine::new(config);
+        e.set_focus(1, "a.exe:Edit", "title");
+        e.set_ime(true, true);
+        e.set_lock(LockMod::NumLock, true);
+        assert_eq!(e.focus().len(), 1);
+    }
+
     #[test]
     fn undefined_key_is_dropped() {
         let (config, global) = base();

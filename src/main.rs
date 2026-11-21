@@ -1,4 +1,6 @@
 //! 本体。フックを張り、`.mayu` の設定でキーを差し替え、タスクトレイに常駐する。
+//! リリースビルドはコンソールの窓を出さない（yamy と同じ）。ログはトレイの「ログ」か `--log` で見る。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //!
 //! ```text
 //! newmayu [-Dシンボル…] [--log <path>] [--test-input <印>] [--test-mayu <file.mayu>]
@@ -89,11 +91,15 @@ static UI_THREAD: AtomicU32 = AtomicU32::new(0);
 /// 一時停止中。コールバックは何もせず次のフックへ流す。
 static PAUSED: AtomicBool = AtomicBool::new(false);
 
+/// 設定を一度でも読めた。読めるまでは、yamy と同じくキーを差し替えずに流す。
+static LOADED: AtomicBool = AtomicBool::new(false);
+
 /// テスト入力モードの印（`--test-input`）。フックを掛ける前に設定する。
 static TEST_MARK: OnceLock<Option<usize>> = OnceLock::new();
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 && !PAUSED.load(Ordering::Relaxed) {
+    if code == HC_ACTION as i32 && !PAUSED.load(Ordering::Relaxed) && LOADED.load(Ordering::Relaxed)
+    {
         // SAFETY: WH_KEYBOARD_LL では lparam は KBDLLHOOKSTRUCT を指す。
         let k = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         let test_mark = TEST_MARK.get().copied().flatten();
@@ -220,6 +226,7 @@ fn reload(tx: &Sender<Event>, symbols: &[String], test_mayu: Option<&Path>) {
         Ok((c, path)) => {
             log!("再読込: {}", path.display());
             let _ = tx.send(Event::Reload(Box::new(c)));
+            LOADED.store(true, Ordering::Relaxed);
         }
         Err(e) => {
             log!("再読込に失敗。今の設定のまま: {e}");
@@ -577,20 +584,33 @@ fn main() -> ExitCode {
     if let Err(e) = Ini::beside_exe().and_then(log_dialog::create) {
         return fatal(&e);
     }
-    let (config, path) = match load_config(&args.symbols, args.test_mayu.as_deref()) {
-        Ok(c) => c,
-        Err(e) => return fatal(&e),
+    let config = match load_config(&args.symbols, args.test_mayu.as_deref()) {
+        Ok((config, path)) => {
+            log!(
+                "{}: キーマップ {} 個、割付 {} 件",
+                path.display(),
+                config.keymaps.len(),
+                config
+                    .keymaps
+                    .iter()
+                    .map(|k| k.assignments.len())
+                    .sum::<usize>()
+            );
+            LOADED.store(true, Ordering::Relaxed);
+            config
+        }
+        Err(e) => {
+            // yamy と同じく、読めなくても終わらない。ログを出し、キーは差し替えずに常駐する。
+            // トレイの「選択」「設定」「再読込」で読み直せる
+            log!("{e}");
+            log!("読み込みに失敗。キーは差し替えない");
+            log_dialog::show();
+            match parser::load_str("", "", Path::new(".")) {
+                Ok(c) => c,
+                Err(e) => return fatal(&e.to_string()),
+            }
+        }
     };
-    log!(
-        "{}: キーマップ {} 個、割付 {} 件",
-        path.display(),
-        config.keymaps.len(),
-        config
-            .keymaps
-            .iter()
-            .map(|k| k.assignments.len())
-            .sum::<usize>()
-    );
 
     let (tx, rx) = channel::<Event>();
     TX.set(tx.clone()).expect("TX は一度だけ設定する");
