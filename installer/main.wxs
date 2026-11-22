@@ -23,6 +23,10 @@
                   DowngradeErrorMessage="新しい版の newmayu が入っています。" />
     <MediaTemplate EmbedCab="yes" />
 
+    <!-- 「アプリと機能」とスタートメニューのアイコン（exe と同じ yamy の mayu.ico） -->
+    <Icon Id="newmayu.ico" SourceFile="crates\newmayu\res\mayu.ico" />
+    <Property Id="ARPPRODUCTICON" Value="newmayu.ico" />
+
     <!-- 入れ替え・アンインストールの前に、動いている newmayu を終わらせる。
          トレイの窓への WM_CLOSE で終わる。終わらなければ強制終了する -->
     <util:CloseApplication Id="CloseNewmayu"
@@ -74,6 +78,7 @@
         <Shortcut Id="StartMenu"
                   Name="newmayu"
                   Target="[#newmayu.exe]"
+                  Icon="newmayu.ico"
                   WorkingDirectory="INSTALLFOLDER" />
         <RegistryValue Root="HKMU"
                        Key="Software\newmayu"

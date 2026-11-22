@@ -1,0 +1,5 @@
+// newmayu のリソース。アイコンは yamy（mayu.rc）と同じ 3 つ。
+// 番号の小さいものが exe のアイコンになる。
+1 ICON "mayu.ico"
+2 ICON "mayufile.ico"
+3 ICON "mayudisabled.ico"

@@ -20,6 +20,11 @@ unsafe extern "system" {
 }
 
 fn main() {
+    // アイコン（res/newmayu.rc）を exe のリソースに入れる
+    embed_resource::compile("res/newmayu.rc", embed_resource::NONE)
+        .manifest_optional()
+        .expect("res/newmayu.rc をコンパイルできない");
+    println!("cargo:rerun-if-changed=res");
     let user = std::env::var("USERNAME").unwrap_or_default();
     let host = std::env::var("COMPUTERNAME")
         .unwrap_or_default()

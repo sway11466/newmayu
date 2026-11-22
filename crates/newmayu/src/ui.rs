@@ -15,17 +15,19 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFY_ICON_MESSAGE,
+    NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, IDI_APPLICATION, LoadIconW,
-    MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW,
-    RegisterWindowMessageW, SetForegroundWindow, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_NONOTIFY,
-    TPM_RETURNCMD, TrackPopupMenu, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_LBUTTONUP, WM_NULL,
-    WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+    DestroyWindow, GWLP_USERDATA, GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, HICON,
+    IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    PostMessageW, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON,
+    SetForegroundWindow, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
+    TrackPopupMenu, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+    WNDCLASSW, WS_OVERLAPPED,
 };
-use windows::core::{BOOL, HSTRING, w};
+use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
 use crate::setting::{self, Ini};
 
@@ -133,7 +135,7 @@ impl Tray {
         .map_err(|e| format!("トレイの窓を作れない: {e}"))?;
         // SAFETY: hwnd は今作った窓。state は Tray が持ち続けるので窓より長く生きる。
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut *state as *mut State as isize) };
-        if !add_icon(hwnd, tip) {
+        if !set_icon(hwnd, tip, false, NIM_ADD) {
             // SAFETY: 今作った窓。
             let _ = unsafe { DestroyWindow(hwnd) };
             return Err("トレイにアイコンを置けない".to_string());
@@ -165,10 +167,34 @@ impl Drop for Tray {
     }
 }
 
-/// アイコンを置く。すでにあるときも同じ。
-fn add_icon(hwnd: HWND, tip: &str) -> bool {
-    // SAFETY: 標準アイコン。hinstance なし。
-    let icon = unsafe { LoadIconW(None, IDI_APPLICATION) }.unwrap_or_default();
+/// リソースのアイコンの番号（res/newmayu.rc）。
+const ICON_NORMAL: u16 = 1;
+const ICON_DISABLED: u16 = 3;
+
+/// リソースのアイコンを小さいアイコンの大きさで読む（yamy の `loadSmallIcon`）。
+fn load_small_icon(id: u16) -> HICON {
+    // SAFETY: 引数なし（自分のモジュール）。
+    let Ok(module) = (unsafe { GetModuleHandleW(None) }) else {
+        return HICON::default();
+    };
+    // SAFETY: id は自分の exe のリソースの番号（MAKEINTRESOURCE）。大きさはシステムの値。
+    unsafe {
+        LoadImageW(
+            Some(module.into()),
+            PCWSTR(id as usize as *const u16),
+            IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON),
+            LR_DEFAULTCOLOR,
+        )
+    }
+    .map(|h| HICON(h.0))
+    .unwrap_or_default()
+}
+
+/// アイコンを置く（`NIM_ADD`）か替える（`NIM_MODIFY`）。一時停止中は yamy と同じく無効のアイコン。
+fn set_icon(hwnd: HWND, tip: &str, paused: bool, op: NOTIFY_ICON_MESSAGE) -> bool {
+    let icon = load_small_icon(if paused { ICON_DISABLED } else { ICON_NORMAL });
     let mut data = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
@@ -182,7 +208,7 @@ fn add_icon(hwnd: HWND, tip: &str) -> bool {
         *dst = src;
     }
     // SAFETY: data は有効な NOTIFYICONDATAW。
-    unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool()
+    unsafe { Shell_NotifyIconW(op, &data) }.as_bool()
 }
 
 /// メニューを出し、選ばれた項目を返す。何も選ばれなければ `None`。
@@ -293,6 +319,7 @@ unsafe extern "system" fn wnd_proc(
             {
                 if let Command::Pause(p) = cmd {
                     state.paused.set(p);
+                    set_icon(hwnd, &state.tip, p, NIM_MODIFY);
                 }
                 (state.handler)(cmd);
             }
@@ -308,7 +335,7 @@ unsafe extern "system" fn wnd_proc(
             return LRESULT(0);
         }
         if msg == state.taskbar_created {
-            add_icon(hwnd, &state.tip);
+            set_icon(hwnd, &state.tip, state.paused.get(), NIM_ADD);
             return LRESULT(0);
         }
     }

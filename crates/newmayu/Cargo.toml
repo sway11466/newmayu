@@ -3,6 +3,9 @@ name = "newmayu"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+embed-resource = "3"
+
 [dependencies]
 encoding_rs = "0.8"
 newmayu-ipc = { path = "../ipc" }
