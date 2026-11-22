@@ -37,3 +37,12 @@ yamy と同じセット。
 
 - インストーラーの中身は `installer\main.wxs`。yamy から持ってきた同梱のファイルと readme は `installer\files\`。
 - zip は `newmayu-<版>-x64` フォルダに、インストーラーと同じファイルを入れる。
+
+## 公開
+
+GitHub のリリースに MSI と zip を添付して配る。
+
+1. `crates\newmayu\Cargo.toml` の `version` を上げてコミットする。
+2. `installer\package.ps1` で MSI と zip を作る。
+3. そのコミットに注釈付きのタグ `v<版>` を付けて push する（`git tag -a v<版> -m "newmayu <版>"`、`git push origin v<版>`）。
+4. `gh release create v<版> target/dist/newmayu-<版>-x64.msi target/dist/newmayu-<版>-x64.zip --title "newmayu <版>" --notes-file <本文のファイル> --verify-tag` で公開する。プレリリースにするときは `--prerelease` を付ける。

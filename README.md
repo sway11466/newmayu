@@ -37,6 +37,7 @@ newmayu は、この 2 つが作ってきた設定言語と動きを受け継ぎ
 
 - Rust（edition 2024）。`cargo build --workspace` でビルド、`cargo test --workspace` でテストします。
 - 構成：本体 `crates/newmayu/`、フック DLL `crates/hook/`、両者の通知の形 `crates/ipc/`。
+- newmayu を動かした後は、ほかのアプリに読み込まれた `newmayu_hook.dll` がしばらく残り、ビルドが上書きできずに失敗します。名前を変えて退けて（例：`newmayu_hook.dll.old`）から `cargo build --workspace` でビルドし直してください。`--workspace` を付けないと DLL が作り直されません。
 - 配布物（MSI と zip）の作り方は [doc/release.md](doc/release.md)。
 
 ## ドキュメント
